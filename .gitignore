@@ -1,0 +1,23 @@
+# python virtual environments
+venv/
+env/
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# vscode settings
+.vscode/
+
+# juce build directories
+Builds/
+cmake-build-*/
+
+# system junk
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
