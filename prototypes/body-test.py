@@ -5,7 +5,7 @@ mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 
 # use your phone cam index (likely 1)
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 
 with mp_pose.Pose(
     model_complexity=1,

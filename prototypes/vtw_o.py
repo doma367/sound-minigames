@@ -5,9 +5,9 @@ import sounddevice as sd
 
 mp_pose = mp.solutions.pose
 
-CAM_INDEX = 1
+CAM_INDEX = 0
 
-# mediapipe landmark indices
+# mediapipe landmarks
 LEFT_WRIST = 15
 LEFT_ELBOW = 13
 LEFT_SHOULDER = 11
@@ -67,7 +67,6 @@ MAX_TILT = 0.07
 # joint and wave smoothing
 JOINT_SMOOTH_ALPHA = 0.45   # faster visual response
 joint_smooth_prev = None
-
 WAVE_SMOOTH_ALPHA = 0.35
 
 

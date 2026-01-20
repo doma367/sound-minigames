@@ -5,7 +5,7 @@ mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
 # init webcam
-cap = cv2.VideoCapture(1) # change based on camera inde
+cap = cv2.VideoCapture(0) # change based on camera inde
 
 with mp_hands.Hands(
     max_num_hands=2,
