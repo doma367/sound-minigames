@@ -1,0 +1,567 @@
+"""
+Gesture Synth — v3
+==================
+Controls
+--------
+  RIGHT hand  → volume  (raise hand = louder)
+  LEFT  hand  → pitch + trigger
+      left  half of frame  → DRONE voice
+      right half of frame  → LEAD  voice
+      open hand  (hold 0.4 s) → note ON
+      fist       (hold 0.3 s) → note OFF
+      pinch (thumb+index)     → latch pitch on first frame of pinch
+
+Keyboard shortcuts
+------------------
+  ESC          quit
+  Z / X        drone octave down / up
+  C / V        lead  octave down / up
+  1-4          select sound
+  S            cycle scale
+
+On-screen menus (click with mouse)
+-----------------------------------
+  [SCALE] button  top-centre
+  [SOUND] button  top-centre (right of scale)
+"""
+
+import cv2
+import mediapipe as mp
+import numpy as np
+import sounddevice as sd
+import threading
+import time
+
+# ══════════════════════════════════════════════════════
+#  1. SCALES & MUSIC THEORY
+# ══════════════════════════════════════════════════════
+
+SCALES = {
+    "Pentatonic":    [0, 2, 4, 7, 9],
+    "Major":         [0, 2, 4, 5, 7, 9, 11],
+    "Natural Minor": [0, 2, 3, 5, 7, 8, 10],
+    "Blues":         [0, 3, 5, 6, 7, 10],
+    "Dorian":        [0, 2, 3, 5, 7, 9, 10],
+    "Phrygian":      [0, 1, 3, 5, 7, 8, 10],
+    "Lydian":        [0, 2, 4, 6, 7, 9, 11],
+    "Mixolydian":    [0, 2, 4, 5, 7, 9, 10],
+    "Chromatic":     list(range(12)),
+}
+SCALE_NAMES = list(SCALES.keys())
+NOTE_NAMES  = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+SOUND_NAMES = ["Sine", "Organ", "Soft Pad", "Pluck"]
+
+C2_HZ = 65.406  # MIDI C2
+
+def freq_to_note_name(freq):
+    if freq <= 0:
+        return "---"
+    midi    = 12 * np.log2(freq / C2_HZ) + 24
+    midi_i  = int(round(midi))
+    return f"{NOTE_NAMES[midi_i % 12]}{midi_i // 12 - 1}"
+
+def y_to_freq(y_norm, scale_semitones, octave_offset, n_octs=2):
+    """Map y∈[0,1] (0=top) → snapped frequency."""
+    sps   = len(scale_semitones)
+    total = sps * n_octs
+    step  = int(np.clip((1.0 - y_norm) * total, 0, total - 1))
+    semi  = scale_semitones[step % sps] + (step // sps) * 12
+    return C2_HZ * (2 ** ((semi + octave_offset * 12) / 12.0))
+
+
+# ══════════════════════════════════════════════════════
+#  2. AUDIO ENGINE
+# ══════════════════════════════════════════════════════
+
+SAMPLE_RATE = 44100
+BLOCK_SIZE  = 256
+
+
+def _smooth_env(cur, tgt, frames, k=0.004):
+    """Vectorised exponential envelope — zero Python loops."""
+    decay = np.exp(-k * np.arange(frames))
+    env   = tgt + (cur - tgt) * decay
+    return env, float(env[-1])
+
+
+def _rich_wave(phases, freq):
+    """Bandlimited odd-harmonic additive (warm organ)."""
+    nyq = SAMPLE_RATE / 2
+    sig = np.zeros(len(phases))
+    h   = 1
+    while freq * h < nyq:
+        sig += (1.0 / h) * np.sin(h * phases)
+        h   += 2
+    return sig / (np.max(np.abs(sig)) + 1e-9)
+
+
+class KarplusStrong:
+    def __init__(self):
+        self._buf    = np.zeros(4096)
+        self._pos    = 0
+        self._size   = 1
+        self._active = False
+
+    def trigger(self, freq):
+        self._size  = max(1, int(SAMPLE_RATE / freq))
+        self._buf   = (np.random.rand(self._size) * 2 - 1).astype(np.float64)
+        self._pos   = 0
+        self._active = True
+
+    def release(self):
+        self._active = False
+
+    def generate(self, frames):
+        out = np.zeros(frames)
+        if not self._active:
+            return out
+        buf, pos, sz = self._buf, self._pos, self._size
+        for i in range(frames):
+            out[i]   = buf[pos]
+            nxt      = (pos + 1) % sz
+            buf[pos] = 0.996 * 0.5 * (buf[pos] + buf[nxt])
+            pos      = nxt
+        self._pos = pos
+        return out
+
+
+class Voice:
+    def __init__(self):
+        self.on      = False
+        self.freq    = 130.81
+        self._phase  = 0.0
+        self._gain   = 0.0
+        self._pad_g  = 0.0    # pad attack gain
+        self._ks     = KarplusStrong()
+        self._prev_on   = False
+
+    def generate(self, frames, sound_idx):
+        tgt = 1.0 if self.on else 0.0
+
+        # ── Karplus-Strong (event driven) ──
+        if sound_idx == 3:
+            if self.on and not self._prev_on:
+                self._ks.trigger(self.freq)
+            if not self.on and self._prev_on:
+                self._ks.release()
+            self._prev_on = self.on
+            return self._ks.generate(frames)
+
+        # ── Soft pad (slow attack sine) ──
+        if sound_idx == 2:
+            inc    = 2 * np.pi * self.freq / SAMPLE_RATE
+            t      = np.arange(frames)
+            phases = self._phase + t * inc
+            self._phase = float(phases[-1]) % (2 * np.pi)
+            sig = np.sin(phases) + 0.3 * np.sin(2 * phases)
+            env, self._pad_g = _smooth_env(self._pad_g, tgt, frames, k=0.0025)
+            self._prev_on = self.on
+            return sig * env
+
+        # ── Sine / Organ (continuous phase) ──
+        inc    = 2 * np.pi * self.freq / SAMPLE_RATE
+        t      = np.arange(frames)
+        phases = self._phase + t * inc
+        self._phase = float(phases[-1]) % (2 * np.pi)
+
+        sig = _rich_wave(phases, self.freq) if sound_idx == 1 else np.sin(phases)
+        env, self._gain = _smooth_env(self._gain, tgt, frames)
+        self._prev_on = self.on
+        return sig * env
+
+
+class AudioEngine:
+    def __init__(self):
+        self._lock      = threading.Lock()
+        self.drone      = Voice()
+        self.lead       = Voice()
+        self.master_vol = 0.0
+        self._vol_gain  = 0.0
+        self.sound_idx  = 1
+
+    def snapshot(self):
+        with self._lock:
+            return (self.drone.on, self.drone.freq,
+                    self.lead.on,  self.lead.freq,
+                    self.master_vol, self.sound_idx)
+
+    def set(self, **kw):
+        with self._lock:
+            for k, v in kw.items():
+                if   k == "drone_on":   self.drone.on    = v
+                elif k == "drone_freq": self.drone.freq   = v
+                elif k == "lead_on":    self.lead.on     = v
+                elif k == "lead_freq":  self.lead.freq    = v
+                else: setattr(self, k, v)
+
+    def callback(self, outdata, frames, time_info, status):
+        with self._lock:
+            mv   = self.master_vol
+            sidx = self.sound_idx
+            d_sig = self.drone.generate(frames, sidx)
+            l_sig = self.lead.generate(frames, sidx)
+
+        v_env, self._vol_gain = _smooth_env(self._vol_gain, mv, frames, k=0.006)
+        mixed = (d_sig * 0.45 + l_sig * 0.30) * v_env
+        outdata[:] = np.clip(mixed, -1.0, 1.0).reshape(-1, 1)
+
+
+engine = AudioEngine()
+stream = sd.OutputStream(
+    channels=1, callback=engine.callback,
+    samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, dtype="float32",
+)
+stream.start()
+
+
+# ══════════════════════════════════════════════════════
+#  3. GESTURE HELPERS
+# ══════════════════════════════════════════════════════
+
+mp_hands      = mp.solutions.hands
+mp_draw       = mp.solutions.drawing_utils
+HAND_CONN     = mp_hands.HAND_CONNECTIONS
+
+hands_detector = mp_hands.Hands(
+    max_num_hands=2,
+    min_detection_confidence=0.80,
+    min_tracking_confidence=0.80,
+    model_complexity=1,
+)
+
+def lm_dist(lms, a, b):
+    p, q = lms.landmark[a], lms.landmark[b]
+    return np.hypot(p.x - q.x, p.y - q.y)
+
+def hand_metrics(lms):
+    pinch  = lm_dist(lms, 4, 8) < 0.055
+    palm   = lms.landmark[9]
+    spread = float(np.mean([
+        np.hypot(lms.landmark[t].x - palm.x, lms.landmark[t].y - palm.y)
+        for t in [4, 8, 12, 16, 20]
+    ]))
+    return pinch, spread, palm.x, palm.y
+
+
+class HoldTimer:
+    """Returns True only after condition held for `threshold` seconds."""
+    def __init__(self, threshold=0.35):
+        self.threshold = threshold
+        self._start    = None
+
+    def update(self, condition):
+        now = time.monotonic()
+        if condition:
+            if self._start is None:
+                self._start = now
+            return (now - self._start) >= self.threshold
+        self._start = None
+        return False
+
+
+class EMA:
+    def __init__(self, alpha=0.25):
+        self.alpha = alpha
+        self._v    = {}
+
+    def __call__(self, key, val):
+        if key not in self._v:
+            self._v[key] = val
+        self._v[key] = self.alpha * val + (1 - self.alpha) * self._v[key]
+        return self._v[key]
+
+
+ema    = EMA(alpha=0.30)
+timers = {
+    "drone_open": HoldTimer(0.40),
+    "drone_fist": HoldTimer(0.30),
+    "lead_open":  HoldTimer(0.40),
+    "lead_fist":  HoldTimer(0.30),
+}
+
+
+# ══════════════════════════════════════════════════════
+#  4. APPLICATION STATE
+# ══════════════════════════════════════════════════════
+
+class AppState:
+    def __init__(self):
+        self.scale_idx       = 0
+        self.sound_idx       = 1
+        self.drone_octave    = 1
+        self.lead_octave     = 3
+        self.show_scale_menu = False
+        self.show_sound_menu = False
+        self._pinch_was      = {}   # leading-edge pinch tracking per hand index
+
+    @property
+    def scale(self):
+        return SCALES[SCALE_NAMES[self.scale_idx]]
+
+    @property
+    def scale_name(self):
+        return SCALE_NAMES[self.scale_idx]
+
+    @property
+    def sound_name(self):
+        return SOUND_NAMES[self.sound_idx]
+
+app = AppState()
+
+
+# ══════════════════════════════════════════════════════
+#  5. DRAWING HELPERS
+# ══════════════════════════════════════════════════════
+
+FONT      = cv2.FONT_HERSHEY_SIMPLEX
+C_PANEL   = (32,  32,  40)
+C_ACCENT1 = (50, 140, 255)    # blue  (drone)  BGR
+C_ACCENT2 = (50, 210, 130)    # green (lead)   BGR
+C_TEXT    = (225, 225, 225)
+C_DIM     = (100, 100, 110)
+C_GREEN   = ( 60, 210,  80)
+C_HOVER   = ( 55,  55,  70)
+C_WHITE   = (255, 255, 255)
+C_BG_BAR  = (20,  20,  26)
+
+mouse_pos   = [0, 0]
+mouse_click = [False]
+
+def mouse_cb(event, x, y, flags, param):
+    mouse_pos[0], mouse_pos[1] = x, y
+    if event == cv2.EVENT_LBUTTONDOWN:
+        mouse_click[0] = True
+
+def draw_btn(frame, label, rect, active, hovered, accent):
+    x1,y1,x2,y2 = rect
+    bg = accent if active else (C_HOVER if hovered else C_PANEL)
+    cv2.rectangle(frame, (x1,y1), (x2,y2), bg, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (x1,y1), (x2,y2), accent if active else C_DIM, 1, cv2.LINE_AA)
+    tw, th = cv2.getTextSize(label, FONT, 0.44, 1)[0]
+    cv2.putText(frame, label,
+                (x1 + (x2-x1-tw)//2, y1 + (y2-y1+th)//2),
+                FONT, 0.44, C_BG_BAR if active else C_TEXT, 1, cv2.LINE_AA)
+
+def build_rects(items, ax, ay, iw=160, ih=28):
+    return [(ax, ay+i*(ih+2), ax+iw, ay+i*(ih+2)+ih) for i in range(len(items))]
+
+def draw_dropdown(frame, items, rects, sel, accent):
+    for i,(x1,y1,x2,y2) in enumerate(rects):
+        hov = x1<=mouse_pos[0]<=x2 and y1<=mouse_pos[1]<=y2
+        bg  = accent if i==sel else (C_HOVER if hov else C_PANEL)
+        cv2.rectangle(frame,(x1,y1),(x2,y2),bg,-1,cv2.LINE_AA)
+        cv2.rectangle(frame,(x1,y1),(x2,y2),accent if i==sel else C_DIM,1,cv2.LINE_AA)
+        tw,th = cv2.getTextSize(items[i],FONT,0.43,1)[0]
+        cv2.putText(frame,items[i],(x1+10,y1+(y2-y1+th)//2),FONT,0.43,
+                    C_BG_BAR if i==sel else C_TEXT,1,cv2.LINE_AA)
+
+def draw_volume_bar(frame, vol, cx, ytop, bh=120, bw=12):
+    x1,x2 = cx-bw//2, cx+bw//2
+    cv2.rectangle(frame,(x1,ytop),(x2,ytop+bh),C_PANEL,-1,cv2.LINE_AA)
+    cv2.rectangle(frame,(x1,ytop),(x2,ytop+bh),C_DIM,1,cv2.LINE_AA)
+    f = int(vol*bh)
+    if f>0:
+        cv2.rectangle(frame,(x1,ytop+bh-f),(x2,ytop+bh),C_GREEN,-1,cv2.LINE_AA)
+    cv2.putText(frame,f"{int(vol*100)}%",(cx-14,ytop+bh+16),FONT,0.38,C_GREEN,1,cv2.LINE_AA)
+
+def draw_hud(frame, w, h):
+    with engine._lock:
+        d_on,d_freq = engine.drone.on, engine.drone.freq
+        l_on,l_freq = engine.lead.on,  engine.lead.freq
+    by = h-54
+    cv2.rectangle(frame,(0,by),(w,h),C_BG_BAR,-1,cv2.LINE_AA)
+    cv2.line(frame,(0,by),(w,by),C_DIM,1,cv2.LINE_AA)
+
+    dc = C_ACCENT1 if d_on else C_DIM
+    lc = C_ACCENT2 if l_on else C_DIM
+    cv2.putText(frame,f"DRONE  {freq_to_note_name(d_freq)}  {d_freq:.1f}Hz",(16,by+20),FONT,0.5,dc,1,cv2.LINE_AA)
+    cv2.putText(frame,"● ON" if d_on else "○ OFF",(16,by+40),FONT,0.4,dc,1,cv2.LINE_AA)
+    cv2.putText(frame,f"LEAD   {freq_to_note_name(l_freq)}  {l_freq:.1f}Hz",(w-300,by+20),FONT,0.5,lc,1,cv2.LINE_AA)
+    cv2.putText(frame,"● ON" if l_on else "○ OFF",(w-300,by+40),FONT,0.4,lc,1,cv2.LINE_AA)
+
+    cx=w//2
+    cv2.putText(frame,f"Scale: {app.scale_name}",(cx-85,by+18),FONT,0.42,C_TEXT,1,cv2.LINE_AA)
+    cv2.putText(frame,f"Sound: {app.sound_name}",(cx-85,by+38),FONT,0.42,C_TEXT,1,cv2.LINE_AA)
+
+def draw_zones(frame, w, h):
+    cv2.line(frame,(w//2,55),(w//2,h-57),(55,55,65),1,cv2.LINE_AA)
+    cv2.putText(frame,"DRONE",(w//4-28,h-62),FONT,0.5,C_ACCENT1,1,cv2.LINE_AA)
+    cv2.putText(frame,"LEAD" ,(3*w//4-22,h-62),FONT,0.5,C_ACCENT2,1,cv2.LINE_AA)
+    cv2.putText(frame,f"Oct {app.drone_octave}",(w//4-18,72),FONT,0.38,C_ACCENT1,1,cv2.LINE_AA)
+    cv2.putText(frame,f"Oct {app.lead_octave}" ,(3*w//4-18,72),FONT,0.38,C_ACCENT2,1,cv2.LINE_AA)
+
+def draw_hints(frame, w, h):
+    for i,txt in enumerate([
+        "Z/X drone oct   C/V lead oct   S cycle scale   1-4 sound",
+        "Left hand: open=play  fist=stop  pinch=set pitch",
+        "Right hand: height = volume",
+    ]):
+        cv2.putText(frame,txt,(w//2-230,h-112-i*16),FONT,0.33,C_DIM,1,cv2.LINE_AA)
+
+def draw_ring(frame, spread, cx, cy, color, on):
+    r   = int(np.clip(spread*270,12,85))
+    col = color if on else C_DIM
+    cv2.circle(frame,(cx,cy),r,col,2 if on else 1,cv2.LINE_AA)
+    if on:
+        cv2.circle(frame,(cx,cy),5,color,-1,cv2.LINE_AA)
+
+
+# ══════════════════════════════════════════════════════
+#  6. MAIN LOOP
+# ══════════════════════════════════════════════════════
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+WIN = "Gesture Synth"
+cv2.namedWindow(WIN)
+cv2.setMouseCallback(WIN, mouse_cb)
+
+while cap.isOpened():
+    ok, frame = cap.read()
+    if not ok:
+        break
+
+    frame = cv2.flip(frame, 1)
+    h, w  = frame.shape[:2]
+
+    # Subtle dark overlay for legibility
+    frame = cv2.addWeighted(frame, 0.76, np.zeros_like(frame), 0.24, 0)
+
+    rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands_detector.process(rgb)
+
+    # Button geometry
+    BTN_SCALE = (w//2-172, 8, w//2-8,  38)
+    BTN_SOUND = (w//2+8,   8, w//2+172, 38)
+
+    hov_s = BTN_SCALE[0]<=mouse_pos[0]<=BTN_SCALE[2] and BTN_SCALE[1]<=mouse_pos[1]<=BTN_SCALE[3]
+    hov_d = BTN_SOUND[0]<=mouse_pos[0]<=BTN_SOUND[2] and BTN_SOUND[1]<=mouse_pos[1]<=BTN_SOUND[3]
+
+    smr = build_rects(SCALE_NAMES, BTN_SCALE[0], BTN_SCALE[3]+4)
+    snr = build_rects(SOUND_NAMES, BTN_SOUND[0], BTN_SOUND[3]+4, iw=145)
+
+    # ── Mouse clicks ──
+    if mouse_click[0]:
+        mx, my = mouse_pos
+        clicked_menu = False
+        if BTN_SCALE[0]<=mx<=BTN_SCALE[2] and BTN_SCALE[1]<=my<=BTN_SCALE[3]:
+            app.show_scale_menu = not app.show_scale_menu
+            app.show_sound_menu = False
+            clicked_menu = True
+        elif BTN_SOUND[0]<=mx<=BTN_SOUND[2] and BTN_SOUND[1]<=my<=BTN_SOUND[3]:
+            app.show_sound_menu = not app.show_sound_menu
+            app.show_scale_menu = False
+            clicked_menu = True
+        elif app.show_scale_menu:
+            for i,(x1,y1,x2,y2) in enumerate(smr):
+                if x1<=mx<=x2 and y1<=my<=y2:
+                    app.scale_idx = i
+                    break
+            app.show_scale_menu = False
+            clicked_menu = True
+        elif app.show_sound_menu:
+            for i,(x1,y1,x2,y2) in enumerate(snr):
+                if x1<=mx<=x2 and y1<=my<=y2:
+                    app.sound_idx = i
+                    engine.set(sound_idx=i)
+                    break
+            app.show_sound_menu = False
+            clicked_menu = True
+        if not clicked_menu:
+            app.show_scale_menu = False
+            app.show_sound_menu = False
+        mouse_click[0] = False
+
+    # ── Hands ──
+    if results.multi_hand_landmarks and results.multi_handedness:
+        for i, lms in enumerate(results.multi_hand_landmarks):
+            # Swap labels (frame is flipped)
+            raw   = results.multi_handedness[i].classification[0].label
+            label = "Right" if raw == "Left" else "Left"
+
+            pinch, spread, hx, hy = hand_metrics(lms)
+            hx = ema(f"{i}_x", hx)
+            hy = ema(f"{i}_y", hy)
+            px, py = int(hx * w), int(hy * h)
+
+            # ── RIGHT → volume ──────────────────────────────────
+            if label == "Right":
+                vol = float(np.clip(1.15 - hy * 1.3, 0.0, 1.0))
+                vol = ema("vol", vol)
+                engine.set(master_vol=vol)
+                draw_volume_bar(frame, vol, px, max(10, py - 80))
+                cv2.putText(frame,"VOL",(px-12, max(8, py-90)),FONT,0.38,C_GREEN,1,cv2.LINE_AA)
+
+            # ── LEFT → pitch + trigger ──────────────────────────
+            if label == "Left":
+                is_drone = hx < 0.5
+                accent   = C_ACCENT1 if is_drone else C_ACCENT2
+                ok_key   = "drone_open" if is_drone else "lead_open"
+                off_key  = "drone_fist" if is_drone else "lead_fist"
+                on_key   = "drone_on"   if is_drone else "lead_on"
+                fr_key   = "drone_freq" if is_drone else "lead_freq"
+
+                # 1. Triggering (5-finger gesture)
+                if timers[ok_key].update(spread > 0.20):
+                    engine.set(**{on_key: True})
+                if timers[off_key].update(spread < 0.10):
+                    engine.set(**{on_key: False})
+
+                # 2. Pitch Clutch (FIXED LOGIC)
+                # Instead of 'if pinch and not was_pinch', we update AS LONG AS pinched.
+                # This allows you to "scrub" through the notes until you find the right one.
+                if pinch:
+                    oct_ = app.drone_octave if is_drone else app.lead_octave
+                    freq = y_to_freq(hy, app.scale, oct_)
+                    engine.set(**{fr_key: freq})
+                    
+                    # Visual feedback for "Active Tuning"
+                    cv2.circle(frame, (px, py), 22, C_WHITE, 2, cv2.LINE_AA)
+                    cv2.putText(frame, "TUNING", (px + 25, py), FONT, 0.45, C_WHITE, 1)
+
+                # Track state by hand label for stability
+                app._pinch_was[label] = pinch
+
+                # Visual feedback for the "Gate"
+                with engine._lock:
+                    cur_on = engine.drone.on if is_drone else engine.lead.on
+                draw_ring(frame, spread, px, py, accent, cur_on)
+
+            mp_draw.draw_landmarks(
+                frame, lms, HAND_CONN,
+                mp_draw.DrawingSpec(color=(170,170,200), thickness=1, circle_radius=2),
+                mp_draw.DrawingSpec(color=(85,  85, 110), thickness=1),
+            )
+
+    # ── UI overlays ──
+    draw_zones(frame, w, h)
+    draw_hud(frame, w, h)
+    draw_hints(frame, w, h)
+    draw_btn(frame, f"◀ {app.scale_name} ▶", BTN_SCALE, app.show_scale_menu, hov_s, C_ACCENT1)
+    draw_btn(frame, f"♪ {app.sound_name}",    BTN_SOUND, app.show_sound_menu, hov_d, C_ACCENT2)
+    if app.show_scale_menu:
+        draw_dropdown(frame, SCALE_NAMES, smr, app.scale_idx, C_ACCENT1)
+    if app.show_sound_menu:
+        draw_dropdown(frame, SOUND_NAMES, snr, app.sound_idx, C_ACCENT2)
+
+    cv2.imshow(WIN, frame)
+
+    # ── Keys ──
+    key = cv2.waitKey(1) & 0xFF
+    if key == 27:
+        break
+    elif key == ord('z'): app.drone_octave = max(0, app.drone_octave-1)
+    elif key == ord('x'): app.drone_octave = min(5, app.drone_octave+1)
+    elif key == ord('c'): app.lead_octave  = max(0, app.lead_octave -1)
+    elif key == ord('v'): app.lead_octave  = min(5, app.lead_octave +1)
+    elif key == ord('s'): app.scale_idx = (app.scale_idx+1) % len(SCALE_NAMES)
+    elif ord('1') <= key <= ord('4'):
+        idx = key - ord('1')
+        app.sound_idx = idx
+        engine.set(sound_idx=idx)
+
+cap.release()
+stream.stop()
+cv2.destroyAllWindows()
