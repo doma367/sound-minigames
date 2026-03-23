@@ -192,7 +192,8 @@ def main():
             ret, frame = cap.read()
             if not ret:
                 break
-            frame     = cv2.flip(frame, 1)
+            # Flip horizontally for mirror effect (already flipped vertically by cv2)
+            frame = cv2.flip(frame, 1)
             rgb_frame, gesture = tracker.process(frame)
 
             if not tap_mode:
@@ -217,7 +218,7 @@ def main():
             waveform     = engine.get_waveform()
             hit_envs     = engine.get_hit_envelopes()
 
-            tap_btn, ebtn = ui.draw(
+            tap_btn, ebtn, confirm_yes, confirm_no = ui.draw(
                 screen       = screen,
                 cam_rgb      = rgb_frame,
                 grid         = grid,
@@ -260,6 +261,23 @@ def main():
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = event.pos
 
+                    # ── Confirm-delete modal takes priority ───────────
+                    if ui._confirm_row is not None:
+                        if confirm_yes and confirm_yes.collidepoint(mx, my):
+                            row = ui._confirm_row
+                            ui._confirm_row = None
+                            try:
+                                engine.remove_voice(row)
+                                remove_grid_row(row)
+                                engine.grid = grid
+                                ui.rows = engine.rows
+                            except ValueError as e:
+                                error_msg = str(e)
+                                error_t   = time.time()
+                        elif confirm_no and confirm_no.collidepoint(mx, my):
+                            ui._confirm_row = None
+                        continue   # swallow all other clicks while modal is open
+
                     if tap_mode:
                         box = pygame.Rect(W // 2 - 200, H // 2 - 100, 400, 200)
                         if ebtn and ebtn.collidepoint(mx, my):
@@ -293,14 +311,8 @@ def main():
                                     error_t   = time.time()
 
                         elif (row := ui.hit_del_btn(mx, my)) is not None:
-                            try:
-                                engine.remove_voice(row)
-                                remove_grid_row(row)
-                                engine.grid = grid
-                                ui.rows = engine.rows
-                            except ValueError as e:
-                                error_msg = str(e)
-                                error_t   = time.time()
+                            # Ask for confirmation instead of deleting immediately
+                            ui._confirm_row = row
 
                         elif (cell := ui.hit_step(mx, my, active_steps, grid.shape[0])) is not None:
                             r, c = cell

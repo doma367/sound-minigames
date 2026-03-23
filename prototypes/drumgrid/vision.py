@@ -1,33 +1,43 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-SMOOTH_K = 0.18   # EMA smoothing for all gesture values
+SMOOTH_K = 0.18
 
-# Peace sign: index + middle extended, ring + pinky + thumb curled.
-# Must hold for this many frames to confirm the gesture, then the
-# counter resets so it won't re-fire until you drop and re-raise it.
-_PEACE_CONFIRM_FRAMES = 8
-
-# After a toggle fires, ignore further peace signs for this many frames.
-# Stops a single held peace sign from toggling repeatedly.
+_PEACE_CONFIRM_FRAMES  = 8
 _PEACE_COOLDOWN_FRAMES = 20
+
+# MediaPipe hand connections (pairs of landmark indices)
+# Same list the library uses internally, duplicated here so ui.py
+# can draw skeletons without importing mediapipe directly.
+HAND_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,4),       # thumb
+    (0,5),(5,6),(6,7),(7,8),       # index
+    (0,9),(9,10),(10,11),(11,12),  # middle
+    (0,13),(13,14),(14,15),(15,16),# ring
+    (0,17),(17,18),(18,19),(19,20),# pinky
+    (5,9),(9,13),(13,17),          # palm knuckle line
+]
 
 
 @dataclass
 class GestureState:
-    hand_y: float = 0.5
-    is_fist: bool = False
+    hand_y:         float = 0.5
+    is_fist:        bool  = False
     delay_time_val: float = 0.1
     delay_feedback: float = 0.0
-    delay_locked: bool = False
-    # Raw (pre-smooth) versions for immediate UI feedback
-    _raw_delay_time: float = 0.1
+    delay_locked:   bool  = False
+    # Raw (pre-smooth) values
+    _raw_delay_time:    float = 0.1
     _raw_delay_feedback: float = 0.0
-    _raw_hand_y: float = 0.5
-
+    _raw_hand_y:        float = 0.5
+    # Raw landmark lists for skeleton drawing — each entry is a list of
+    # (x, y) normalised coords [0..1], or None if hand not detected.
+    # Index 0 = first detected hand, index 1 = second.
+    # Each list has label ('Left'/'Right') + landmarks.
+    hand_landmarks: list = field(default_factory=list)
 
 def _is_peace(lms) -> bool:
     """
@@ -71,7 +81,16 @@ class HandTracker:
         results = self._hands.process(rgb)
         s = self.state
 
+        # Reset landmarks each frame so stale data doesn't linger
+        s.hand_landmarks = []
+
         if results.multi_hand_landmarks:
+            # Store raw landmarks for skeleton drawing
+            for i, hand_lms in enumerate(results.multi_hand_landmarks):
+                label = results.multi_handedness[i].classification[0].label
+                pts   = [(lm.x, lm.y) for lm in hand_lms.landmark]
+                s.hand_landmarks.append({"label": label, "pts": pts})
+
             for i, hand_lms in enumerate(results.multi_hand_landmarks):
                 label = results.multi_handedness[i].classification[0].label
                 lms = hand_lms.landmark
