@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<JUCERPROJECT id="XSCRzK" name="somatun_juce" projectType="guiapp" useAppConfig="0"
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" bundleIdentifier="com.yourcompany.somatunjuce">
+  <MAINGROUP id="e5MxLg" name="somatun_juce">
+    <GROUP id="{280436B1-8603-01FF-FD10-454218C47552}" name="Source">
+      <FILE id="yOthAe" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
+      <FILE id="uMIDA4" name="MainComponent.h" compile="0" resource="0" file="Source/MainComponent.h"/>
+      <FILE id="GjMqsq" name="MainComponent.cpp" compile="1" resource="0"
+            file="Source/MainComponent.cpp"/>
+    </GROUP>
+    <FILE id="PCKQJo" name="HelpOverlay.cpp" compile="1" resource="0" file="Source/HelpOverlay.cpp"/>
+    <FILE id="ydxo7D" name="HelpOverlay.h" compile="0" resource="0" file="Source/HelpOverlay.h"/>
+    <FILE id="UnQVdd" name="LandingPage.cpp" compile="1" resource="0" file="Source/LandingPage.cpp"/>
+    <FILE id="ZnBIaM" name="LandingPage.h" compile="0" resource="0" file="Source/LandingPage.h"/>
+    <FILE id="JchB0B" name="SettingsPage.cpp" compile="1" resource="0"
+          file="Source/SettingsPage.cpp"/>
+    <FILE id="bzZiht" name="SettingsPage.h" compile="0" resource="0" file="Source/SettingsPage.h"/>
+    <FILE id="R9mOt3" name="SomatunLookAndFeel.h" compile="0" resource="0"
+          file="Source/SomatunLookAndFeel.h"/>
+  </MAINGROUP>
+  <MODULES>
+    <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_audio_devices" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_core" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_data_structures" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_events" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_graphics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_gui_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_gui_extra" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_video" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+  </MODULES>
+  <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1"/>
+  <EXPORTFORMATS>
+    <XCODE_MAC targetFolder="Builds/MacOSX" cameraPermissionNeeded="1">
+      <CONFIGURATIONS>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce"/>
+      </CONFIGURATIONS>
+      <MODULEPATHS>
+        <MODULEPATH id="juce_audio_basics" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_audio_devices" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_core" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_data_structures" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_events" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_graphics" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_gui_basics" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_video" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_gui_extra" path="../../../JUCE/modules"/>
+      </MODULEPATHS>
+    </XCODE_MAC>
+  </EXPORTFORMATS>
+</JUCERPROJECT>
