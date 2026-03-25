@@ -3,6 +3,12 @@
 <JUCERPROJECT id="XSCRzK" name="somatun_juce" projectType="guiapp" useAppConfig="0"
               addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" bundleIdentifier="com.yourcompany.somatunjuce">
   <MAINGROUP id="e5MxLg" name="somatun_juce">
+    <GROUP id="{DC48F4E6-5D95-C22F-9250-23864C985E70}" name="Assets">
+      <FILE id="vVcre0" name="somatun_icon.png" compile="0" resource="1"
+            file="Assets/somatun_icon.png"/>
+      <FILE id="XcQI2H" name="somatun_logo.png" compile="0" resource="1"
+            file="Assets/somatun_logo.png"/>
+    </GROUP>
     <GROUP id="{280436B1-8603-01FF-FD10-454218C47552}" name="Source">
       <FILE id="yOthAe" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
       <FILE id="uMIDA4" name="MainComponent.h" compile="0" resource="0" file="Source/MainComponent.h"/>
@@ -32,7 +38,8 @@
   </MODULES>
   <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1"/>
   <EXPORTFORMATS>
-    <XCODE_MAC targetFolder="Builds/MacOSX" cameraPermissionNeeded="1">
+    <XCODE_MAC targetFolder="Builds/MacOSX" cameraPermissionNeeded="1" smallIcon="XcQI2H"
+               bigIcon="vVcre0">
       <CONFIGURATIONS>
         <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce"/>
         <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce"/>

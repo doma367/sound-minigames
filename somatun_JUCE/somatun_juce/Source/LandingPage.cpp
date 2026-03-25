@@ -14,6 +14,11 @@ LandingPage::LandingPage(MainComponent& mc) : mainComponent(mc)
     setLookAndFeel(&laf);
     setInterceptsMouseClicks(true, true);
 
+    logoImage = juce::ImageCache::getFromMemory(BinaryData::somatun_logo_png,
+        BinaryData::somatun_logo_pngSize);
+    iconImage = juce::ImageCache::getFromMemory(BinaryData::somatun_icon_png,
+        BinaryData::somatun_icon_pngSize);
+
     // Game buttons — transparent, just handle mouse
     game1Button.setButtonText("FLESHSYNTH");
     game2Button.setButtonText("PULSEFIELD");
@@ -29,6 +34,17 @@ LandingPage::LandingPage(MainComponent& mc) : mainComponent(mc)
 
     initParticles();
     startTimerHz(40);
+
+    // --- ADD THIS TO CONSTRUCTOR ---
+    settingsButton.setAlpha(0.0f);
+    helpButton.setAlpha(0.0f);
+    
+    // Disable clicks during boot sequence
+    game1Button.setInterceptsMouseClicks(false, false);
+    game2Button.setInterceptsMouseClicks(false, false);
+    game3Button.setInterceptsMouseClicks(false, false);
+    settingsButton.setInterceptsMouseClicks(false, false);
+    helpButton.setInterceptsMouseClicks(false, false);
 }
 
 LandingPage::~LandingPage()
@@ -41,21 +57,50 @@ void LandingPage::initParticles()
 {
     particles.clear();
     juce::Random rng;
-    for (int i = 0; i < 35; ++i)
+
+    for (int i = 0; i < 60; ++i)
     {
         Particle p;
         p.x     = rng.nextFloat() * 800.0f;
         p.y     = rng.nextFloat() * 600.0f;
-        p.vx    = (rng.nextFloat() - 0.5f) * 0.4f;
-        p.vy    = -(rng.nextFloat() * 0.5f + 0.1f);
-        p.alpha = rng.nextFloat() * 0.7f + 0.3f;
-        p.size  = rng.nextFloat() * 2.0f + 1.0f;
+        p.vx    = (rng.nextFloat() - 0.5f) * 0.6f;
+        p.vy    = -(rng.nextFloat() * 0.8f + 0.2f);
+
+        // FIXED: stays between 0.4 and 1.0
+        p.alpha = rng.nextFloat() * 0.6f + 0.4f;
+
+        p.size  = rng.nextFloat() * 3.5f + 1.0f;
         particles.add(p);
     }
 }
 
 void LandingPage::timerCallback()
 {
+    // === 1. UPDATED BOOT TIMER LOGIC ===
+    if (bootTime < BOOT_UI_IN)
+    {
+        bootTime += 1.0f / 40.0f; // 40Hz timer step
+        
+        // Fade in buttons only during the final UI phase (after DELAY_2)
+        float uiAlpha = 0.0f;
+        if (bootTime > BOOT_DELAY_2) {
+            uiAlpha = juce::jlimit(0.0f, 1.0f, (bootTime - BOOT_DELAY_2) / (BOOT_UI_IN - BOOT_DELAY_2));
+        }
+        
+        settingsButton.setAlpha(uiAlpha);
+        helpButton.setAlpha(uiAlpha);
+        
+        // Re-enable clicks once the UI is fully visible
+        if (bootTime >= BOOT_UI_IN)
+        {
+            game1Button.setInterceptsMouseClicks(true, false);
+            game2Button.setInterceptsMouseClicks(true, false);
+            game3Button.setInterceptsMouseClicks(true, false);
+            settingsButton.setInterceptsMouseClicks(true, false);
+            helpButton.setInterceptsMouseClicks(true, false);
+        }
+    }
+    // =====================================
     // Move particles
     for (auto& p : particles)
     {
@@ -97,8 +142,58 @@ void LandingPage::timerCallback()
 
 void LandingPage::paint(juce::Graphics& g)
 {
-    // Background
+    // 1. Always keep the background dark
     g.fillAll(BG_DARK);
+
+    // === 2. OMINOUS LOGO SEQUENCE ===
+    if (bootTime < BOOT_DELAY_2) 
+    {
+        if (logoImage.isValid() && bootTime > BOOT_DELAY_1)
+        {
+            auto w = getWidth();
+            auto h = getHeight();
+
+            // Scale logic: Starts at 0.85, slowly drifts to 0.95
+            float logoDuration = BOOT_LOGO_OUT - BOOT_DELAY_1;
+            float scaleProgress = (bootTime - BOOT_DELAY_1) / logoDuration;
+            float currentScale = 0.85f + (scaleProgress * 0.10f); 
+
+            // Alpha logic: Wait for delay 1, fade in, fade out
+            float logoAlpha = 0.0f;
+            if (bootTime < BOOT_LOGO_IN) {
+                logoAlpha = (bootTime - BOOT_DELAY_1) / (BOOT_LOGO_IN - BOOT_DELAY_1);
+            } else {
+                logoAlpha = 1.0f - ((bootTime - BOOT_LOGO_IN) / (BOOT_LOGO_OUT - BOOT_LOGO_IN));
+            }
+            logoAlpha = juce::jlimit(0.0f, 1.0f, logoAlpha);
+
+            int baseLogoH = 280;
+            int baseLogoW = (int)((float)logoImage.getWidth() / (float)logoImage.getHeight() * (float)baseLogoH);
+            
+            int logoW = (int)(baseLogoW * currentScale);
+            int logoH = (int)(baseLogoH * currentScale);
+            int logoX = (w - logoW) / 2;
+            int logoY = (h - logoH) / 2;
+
+            g.setOpacity(logoAlpha);
+            g.drawImage(logoImage,
+                        logoX, logoY, logoW, logoH,
+                        0, 0, logoImage.getWidth(), logoImage.getHeight());
+            g.setOpacity(1.0f);
+        }
+        return; // Stop drawing here while the logo sequence is happening!
+    }
+
+    // === 3. CREEPING UI FADE IN ===
+    float uiAlpha = 1.0f;
+    if (bootTime < BOOT_UI_IN) {
+        // Fades from 0 to 1 between DELAY_2 and UI_IN
+        uiAlpha = juce::jlimit(0.0f, 1.0f, (bootTime - BOOT_DELAY_2) / (BOOT_UI_IN - BOOT_DELAY_2));
+    }
+    
+    // Render everything below this into a single, beautifully faded layer
+    g.beginTransparencyLayer(uiAlpha);
+    // ======================================
 
     drawGrid(g);
     drawParticles(g);
@@ -158,6 +253,8 @@ void LandingPage::paint(juce::Graphics& g)
     g.setColour(TEXT_DIM.withAlpha(0.3f));
     g.setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
     g.drawText("v0.1.0-alpha", 32, h - 30, 100, 20, juce::Justification::centredLeft);
+
+    g.endTransparencyLayer();
 }
 
 void LandingPage::drawGrid(juce::Graphics& g)
@@ -176,7 +273,15 @@ void LandingPage::drawParticles(juce::Graphics& g)
 {
     for (const auto& p : particles)
     {
-        g.setColour(ACCENT.withAlpha(p.alpha * 0.6f));
+        // optional safety clamp in case future-you messes it up again
+        float alpha = juce::jlimit(0.0f, 1.0f, p.alpha);
+
+        // Outer glow
+        g.setColour(ACCENT.withAlpha(alpha * 0.25f));
+        g.fillEllipse(p.x - p.size * 1.5f, p.y - p.size * 1.5f, p.size * 3.0f, p.size * 3.0f);
+
+        // Core dot
+        g.setColour(ACCENT.withAlpha(alpha));
         g.fillEllipse(p.x - p.size * 0.5f, p.y - p.size * 0.5f, p.size, p.size);
     }
 }
@@ -197,31 +302,48 @@ void LandingPage::drawTitle(juce::Graphics& g)
 {
     auto w = getWidth();
 
-    // Subtitle above
+    // Status line
     g.setColour(TEXT_DIM);
     g.setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
     g.drawText("MOTION  *  SOUND  *  INTERFACE", 0, 44, w, 14, juce::Justification::centred);
 
-    // Main title with flicker
-    g.setColour(ACCENT.withAlpha(flickerAlpha));
-    g.setFont(juce::Font(juce::FontOptions().withHeight(54.0f)));
-    g.drawText("SOMATUN", 0, 58, w, 64, juce::Justification::centred);
+    // Logo image replacing the text
+    if (logoImage.isValid())
+    {
+        // Draw centered, scaled to fit nicely
+        int logoH = 280; // or whatever size u want
+        int logoW = (int)((float)logoImage.getWidth() / (float)logoImage.getHeight() * (float)logoH);
+
+        // center horizontally
+        int logoX = (w - logoW) / 2;
+
+        // center vertically in the title section instead of hardcoding
+        int titleTop = 58;
+        int titleHeight = 100;
+        int logoY = titleTop + (titleHeight - logoH) / 2;
+
+        g.setOpacity(flickerAlpha);
+        g.drawImage(logoImage,
+                    logoX, logoY, logoW, logoH,
+                    0, 0, logoImage.getWidth(), logoImage.getHeight());
+        g.setOpacity(1.0f);
+    }
 
     // Divider line
     int lineW = 320;
     int lineX = (w - lineW) / 2;
-    juce::ColourGradient grad(juce::Colours::transparentBlack, (float)lineX, 126.0f,
-                               juce::Colours::transparentBlack, (float)(lineX + lineW), 126.0f, false);
+    juce::ColourGradient grad(juce::Colours::transparentBlack, (float)lineX, 146.0f,
+                               juce::Colours::transparentBlack, (float)(lineX + lineW), 146.0f, false);
     grad.addColour(0.2, ACCENT_DIM);
     grad.addColour(0.5, ACCENT);
     grad.addColour(0.8, ACCENT_DIM);
     g.setGradientFill(grad);
-    g.fillRect(lineX, 126, lineW, 1);
+    g.fillRect(lineX, 146, lineW, 1);
 
-    // Tagline below
+    // Tagline
     g.setColour(TEXT_DIM);
     g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f)));
-    g.drawText("Gesture-Driven Audio Playground", 0, 132, w, 16, juce::Justification::centred);
+    g.drawText("Gesture-Driven Audio Playground", 0, 152, w, 16, juce::Justification::centred);
 }
 
 void LandingPage::drawGameCard(juce::Graphics& g, juce::Rectangle<int> bounds,
@@ -309,6 +431,10 @@ void LandingPage::resized()
 
 void LandingPage::mouseMove(const juce::MouseEvent& e)
 {
+    // === ADD THIS ===
+    if (bootTime < BOOT_UI_IN) return;
+    // ================
+
     int prev = hoveredCard;
     hoveredCard = game1Button.getBounds().contains(e.getPosition()) ? 0
                 : game2Button.getBounds().contains(e.getPosition()) ? 1

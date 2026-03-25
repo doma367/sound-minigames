@@ -23,6 +23,18 @@ private:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
 
+    juce::Image logoImage;
+    juce::Image iconImage;
+
+    // --- OMINOUS BOOT ANIMATION VARIABLES ---
+    float bootTime = 0.0f;
+    const float BOOT_DELAY_1  = 1.5f;  // 1.5s of pure black
+    const float BOOT_LOGO_IN  = 3.5f;  // 2.0s for logo to slowly emerge
+    const float BOOT_LOGO_OUT = 6.0f;  // 2.5s for logo to fade back out
+    const float BOOT_DELAY_2  = 7.0f;  // 1.0s of pure black again
+    const float BOOT_UI_IN    = 9.0f;  // 2.0s for the UI to creep in
+    // ----------------------------------------
+
     void timerCallback() override;
     void initParticles();
     void drawGrid(juce::Graphics&);
