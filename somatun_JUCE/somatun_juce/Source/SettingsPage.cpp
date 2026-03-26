@@ -1,3 +1,4 @@
+// SettingsPage.cpp
 #include "SettingsPage.h"
 #include "MainComponent.h"
 
@@ -12,11 +13,11 @@ static const juce::Colour S_BG_ROW     { 0xff0a0a0a };
 static const juce::Colour S_TEXT_PRI   { 0xffe8e8e8 };
 static const juce::Colour S_TEXT_DIM   { 0x66e8e8e8 };
 
-static constexpr int ROW_H       = 52;
-static constexpr int SECTION_H   = 36;
-static constexpr int GAP         = 6;
-static constexpr int PREVIEW_H   = 140;
-static constexpr int SIDE_PAD    = 20;
+static constexpr int ROW_H     = 52;
+static constexpr int SECTION_H = 36;
+static constexpr int GAP       = 6;
+static constexpr int PREVIEW_H = 140;
+static constexpr int SIDE_PAD  = 20;
 
 //==============================================================================
 // SettingsContent
@@ -24,19 +25,16 @@ static constexpr int SIDE_PAD    = 20;
 
 void SettingsContent::drawSectionHeader(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::String& title)
 {
-    // Left accent bar
     g.setColour(S_ACCENT);
     g.fillRect(bounds.getX(), bounds.getY() + 8, 2, bounds.getHeight() - 16);
 
-    // Section label
     g.setColour(S_ACCENT);
     g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f)));
     g.drawText(title, bounds.getX() + 12, bounds.getY(), bounds.getWidth() - 12, bounds.getHeight(),
                juce::Justification::centredLeft);
 
-    // Hairline to the right
     g.setColour(juce::Colour(0x22ff3333));
-    int lineX = bounds.getX() + 12 + g.getCurrentFont().getStringWidth(title) + 10;
+    int lineX = bounds.getX() + 12 + (int)g.getCurrentFont().getStringWidthFloat(title) + 10;
     g.drawHorizontalLine(bounds.getCentreY(), (float)lineX, (float)bounds.getRight());
 }
 
@@ -47,7 +45,6 @@ void SettingsContent::drawRowCard(juce::Graphics& g, juce::Rectangle<int> bounds
     g.fillRect(bf);
     g.setColour(juce::Colour(0x18ff3333));
     g.drawRect(bf, 1.0f);
-    // Left accent sliver
     g.setColour(juce::Colour(0x33ff3333));
     g.fillRect(bf.getX(), bf.getY(), 2.0f, bf.getHeight());
 }
@@ -56,7 +53,6 @@ void SettingsContent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::transparentBlack);
 
-    // We compute the same layout as resized() to draw row cards behind controls
     auto area = getLocalBounds().reduced(SIDE_PAD, 0);
     area.removeFromTop(GAP);
 
@@ -67,38 +63,33 @@ void SettingsContent::paint(juce::Graphics& g)
         area.removeFromTop(GAP);
         return r;
     };
-    auto consumePreview = [&]() { area.removeFromTop(PREVIEW_H + GAP); };
 
     // === GENERAL ===
     consumeSection();
-    drawRowCard(g, consumeRow()); // window mode
-
+    drawRowCard(g, consumeRow());
     area.removeFromTop(GAP * 2);
 
     // === INPUT ===
     consumeSection();
-    drawRowCard(g, consumeRow()); // camera device
-    // preview area — draw a bordered dark box
+    drawRowCard(g, consumeRow()); // camera device row
+
     if (cameraPreviewActive)
     {
         auto prev = area.removeFromTop(PREVIEW_H);
         area.removeFromTop(GAP);
+        // Dark background box — the real preview component renders on top of this
         g.setColour(juce::Colour(0xff080808));
         g.fillRect(prev);
         g.setColour(juce::Colour(0x33ff3333));
         g.drawRect(prev.toFloat(), 1.0f);
-        g.setColour(S_TEXT_DIM);
-        g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f)));
-        g.drawText("CAMERA FEED — NOT YET CONNECTED",
-                   prev, juce::Justification::centred);
-        // scanline hint
+        // Scanline overlay
         g.setColour(juce::Colour(0x0aff3333));
         for (int y = prev.getY(); y < prev.getBottom(); y += 4)
             g.drawHorizontalLine(y, (float)prev.getX(), (float)prev.getRight());
     }
+
     drawRowCard(g, consumeRow()); // camera resolution
     drawRowCard(g, consumeRow()); // flip
-
     area.removeFromTop(GAP * 2);
 
     // === OUTPUT ===
@@ -107,9 +98,6 @@ void SettingsContent::paint(juce::Graphics& g)
     drawRowCard(g, consumeRow()); // volume
     drawRowCard(g, consumeRow()); // sample rate
     drawRowCard(g, consumeRow()); // buffer size
-
-    // Row labels drawn over the cards
-    // (labels are actual Label components, so nothing extra needed here)
 }
 
 void SettingsContent::resized()
@@ -124,13 +112,10 @@ void SettingsContent::resized()
     {
         auto row = area.removeFromTop(ROW_H);
         area.removeFromTop(GAP);
-
-        // label sits in left half, vertically centred
         rowLabel.setText(text, juce::dontSendNotification);
         rowLabel.setFont(labelFont);
         rowLabel.setColour(juce::Label::textColourId, S_TEXT_DIM);
         rowLabel.setBounds(row.reduced(10, 0).removeFromLeft(160));
-
         controlLayout(row.reduced(10, 0));
     };
 
@@ -150,9 +135,9 @@ void SettingsContent::resized()
     sectionInputLabel.setBounds(area.removeFromTop(SECTION_H));
     area.removeFromTop(GAP);
 
-    // Camera device row — combo + test button
+    // Camera device row
     {
-        auto row = area.removeFromTop(ROW_H);
+        auto row   = area.removeFromTop(ROW_H);
         area.removeFromTop(GAP);
         auto inner = row.reduced(10, 0);
         cameraDeviceLabel.setText("CAMERA DEVICE", juce::dontSendNotification);
@@ -163,16 +148,18 @@ void SettingsContent::resized()
         cameraCombo.setBounds(inner.reduced(0, 10).removeFromLeft(200));
     }
 
-    // Camera preview (only takes space when active)
+    // Camera preview slot
     if (cameraPreviewActive)
     {
         auto prev = area.removeFromTop(PREVIEW_H);
         area.removeFromTop(GAP);
+        lastPreviewBounds = prev;          // expose to SettingsPage for positioning
         cameraPreviewLabel.setBounds(prev);
-        cameraPreviewLabel.setVisible(true);
+        cameraPreviewLabel.setVisible(false); // real component renders here instead
     }
     else
     {
+        lastPreviewBounds = {};
         cameraPreviewLabel.setVisible(false);
         cameraPreviewLabel.setBounds(0, 0, 0, 0);
     }
@@ -184,7 +171,7 @@ void SettingsContent::resized()
     });
 
     {
-        auto row = area.removeFromTop(ROW_H);
+        auto row   = area.removeFromTop(ROW_H);
         area.removeFromTop(GAP);
         auto inner = row.reduced(10, 0);
         cameraFlipLabel.setText("FLIP HORIZONTAL", juce::dontSendNotification);
@@ -200,9 +187,9 @@ void SettingsContent::resized()
     sectionOutputLabel.setBounds(area.removeFromTop(SECTION_H));
     area.removeFromTop(GAP);
 
-    // Audio device row — combo + test button
+    // Audio device row
     {
-        auto row = area.removeFromTop(ROW_H);
+        auto row   = area.removeFromTop(ROW_H);
         area.removeFromTop(GAP);
         auto inner = row.reduced(10, 0);
         audioDeviceLabel.setText("AUDIO DEVICE", juce::dontSendNotification);
@@ -232,19 +219,16 @@ void SettingsContent::resized()
     });
 }
 
-// Helper: total height of all content so the Viewport knows how tall to make us
+//==============================================================================
 static int computeContentHeight(bool previewActive)
 {
     int h = GAP;
-    // GENERAL section
-    h += SECTION_H + GAP + ROW_H + GAP + GAP * 2;
-    // INPUT section
-    h += SECTION_H + GAP + ROW_H + GAP; // camera device
-    if (previewActive) h += PREVIEW_H + GAP;
-    h += ROW_H + GAP + ROW_H + GAP + GAP * 2; // res + flip
-    // OUTPUT section
-    h += SECTION_H + GAP + (ROW_H + GAP) * 4; // device + vol + sr + buf
-    h += 16; // bottom breathing room
+    h += SECTION_H + GAP + ROW_H + GAP + GAP * 2;           // GENERAL
+    h += SECTION_H + GAP + ROW_H + GAP;                      // INPUT: camera device
+    if (previewActive) h += PREVIEW_H + GAP;                 // INPUT: preview slot
+    h += ROW_H + GAP + ROW_H + GAP + GAP * 2;               // INPUT: res + flip
+    h += SECTION_H + GAP + (ROW_H + GAP) * 4;               // OUTPUT
+    h += 16;
     return h;
 }
 
@@ -273,7 +257,7 @@ SettingsPage::SettingsPage(MainComponent& mc) : mainComponent(mc)
     viewport.getVerticalScrollBar().setColour(juce::ScrollBar::thumbColourId, S_ACCENT_DIM);
     addAndMakeVisible(viewport);
 
-    // Section header labels
+    // Section headers
     auto initSection = [](juce::Label& l, const juce::String& t)
     {
         l.setText(t, juce::dontSendNotification);
@@ -311,17 +295,36 @@ SettingsPage::SettingsPage(MainComponent& mc) : mainComponent(mc)
     content.addAndMakeVisible(content.windowModeLabel);
     content.addAndMakeVisible(content.windowModeCombo);
 
-    // Camera device
+    // Camera device combo — populated later in initialise()
     content.cameraCombo.addItem("(no camera selected)", 1);
     content.cameraCombo.setSelectedId(1);
+
+    // Camera test button
     content.cameraTestButton.onClick = [this]
     {
+        auto devices = juce::CameraDevice::getAvailableDevices();
+
+        // Bail if the combo still shows the placeholder or no devices exist
+        if (devices.isEmpty() || content.cameraCombo.getText().contains("no camera"))
+            return;
+
         content.cameraPreviewActive = !content.cameraPreviewActive;
         content.cameraTestButton.setButtonText(content.cameraPreviewActive ? "HIDE" : "TEST");
+
+        if (content.cameraPreviewActive)
+            openCamera();
+        else
+            closeCamera();
+
         content.setSize(content.getWidth(), computeContentHeight(content.cameraPreviewActive));
         content.resized();
         content.repaint();
+
+        // Position the live preview component over the reserved slot
+        if (cameraPreviewComponent != nullptr)
+            cameraPreviewComponent->setBounds(content.lastPreviewBounds);
     };
+
     content.addAndMakeVisible(content.cameraDeviceLabel);
     content.addAndMakeVisible(content.cameraCombo);
     content.addAndMakeVisible(content.cameraTestButton);
@@ -340,7 +343,7 @@ SettingsPage::SettingsPage(MainComponent& mc) : mainComponent(mc)
     content.addAndMakeVisible(content.cameraFlipLabel);
     content.addAndMakeVisible(content.cameraFlipToggle);
 
-    // Audio device
+    // Audio device combo — populated later in initialise()
     content.audioCombo.addItem("(no audio device)", 1);
     content.audioCombo.setSelectedId(1);
     content.audioTestButton.onClick = [this]
@@ -356,9 +359,9 @@ SettingsPage::SettingsPage(MainComponent& mc) : mainComponent(mc)
     content.volumeSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     content.volumeSlider.setRange(0.0, 1.0);
     content.volumeSlider.setValue(0.8);
-    content.volumeSlider.setColour(juce::Slider::thumbColourId,           S_ACCENT);
-    content.volumeSlider.setColour(juce::Slider::trackColourId,           S_ACCENT_DIM);
-    content.volumeSlider.setColour(juce::Slider::backgroundColourId,      juce::Colour(0xff1a0000));
+    content.volumeSlider.setColour(juce::Slider::thumbColourId,      S_ACCENT);
+    content.volumeSlider.setColour(juce::Slider::trackColourId,      S_ACCENT_DIM);
+    content.volumeSlider.setColour(juce::Slider::backgroundColourId, juce::Colour(0xff1a0000));
     content.addAndMakeVisible(content.volumeLabel);
     content.addAndMakeVisible(content.volumeSlider);
 
@@ -382,34 +385,95 @@ SettingsPage::SettingsPage(MainComponent& mc) : mainComponent(mc)
 
 SettingsPage::~SettingsPage()
 {
+    closeCamera();
     stopTone();
     setLookAndFeel(nullptr);
 }
 
+//==============================================================================
 void SettingsPage::initialise()
 {
-    if (!deviceManager.getCurrentAudioDevice())
-        deviceManager.initialiseWithDefaultDevices(0, 2);
-
     populateAudioDevices();
+    populateCameraDevices();
 }
 
 void SettingsPage::populateAudioDevices()
 {
     content.audioCombo.clear();
+
+    if (!deviceManager.getCurrentAudioDevice())
+        deviceManager.initialiseWithDefaultDevices(0, 2);
+
     auto& types = deviceManager.getAvailableDeviceTypes();
     int id = 1;
+
     for (auto* t : types)
     {
         t->scanForDevices();
         for (auto& name : t->getDeviceNames())
             content.audioCombo.addItem(name, id++);
     }
+
     if (content.audioCombo.getNumItems() == 0)
         content.audioCombo.addItem("(no audio device)", 1);
+
     content.audioCombo.setSelectedId(1);
 }
 
+void SettingsPage::populateCameraDevices()
+{
+    content.cameraCombo.clear();
+
+    auto devices = juce::CameraDevice::getAvailableDevices();
+
+    if (devices.isEmpty())
+    {
+        content.cameraCombo.addItem("(no camera found)", 1);
+    }
+    else
+    {
+        for (int i = 0; i < devices.size(); ++i)
+            content.cameraCombo.addItem(devices[i], i + 1);
+    }
+
+    content.cameraCombo.setSelectedId(1);
+}
+
+void SettingsPage::openCamera()
+{
+    // Index into the device list is combo ID minus 1
+    int selectedIndex = content.cameraCombo.getSelectedId() - 1;
+    auto devices      = juce::CameraDevice::getAvailableDevices();
+
+    if (selectedIndex < 0 || selectedIndex >= devices.size())
+        return;
+
+    cameraDevice.reset(juce::CameraDevice::openDevice(selectedIndex));
+
+    if (cameraDevice == nullptr)
+        return;
+
+    cameraPreviewComponent.reset(cameraDevice->createViewerComponent());
+
+    if (cameraPreviewComponent != nullptr)
+    {
+        content.addAndMakeVisible(*cameraPreviewComponent);
+        // Bounds are set by the caller after resized() has run
+    }
+}
+
+void SettingsPage::closeCamera()
+{
+    if (cameraPreviewComponent != nullptr)
+    {
+        content.removeChildComponent(cameraPreviewComponent.get());
+        cameraPreviewComponent.reset();
+    }
+
+    cameraDevice.reset();
+}
+
+//==============================================================================
 void SettingsPage::startTone()
 {
     toneSource.setAmplitude(0.3f);
@@ -429,6 +493,7 @@ void SettingsPage::stopTone()
     content.audioTestButton.setButtonText("TEST");
 }
 
+//==============================================================================
 void SettingsPage::paint(juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
@@ -436,18 +501,15 @@ void SettingsPage::paint(juce::Graphics& g)
     g.setColour(S_BG_DARK);
     g.fillRect(bounds);
 
-    // Subtle grid
     g.setColour(juce::Colour(0x06ff3333));
     for (int x = 0; x < getWidth(); x += 40)
         g.drawVerticalLine(x, 0.0f, (float)getHeight());
     for (int y = 0; y < getHeight(); y += 40)
         g.drawHorizontalLine(y, 0.0f, (float)getWidth());
 
-    // Border
     g.setColour(S_BORDER_DIM);
     g.drawRect(bounds, 1.0f);
 
-    // Top glow line
     juce::ColourGradient grad(juce::Colours::transparentBlack, bounds.getX(), bounds.getY(),
                                juce::Colours::transparentBlack, bounds.getRight(), bounds.getY(), false);
     grad.addColour(0.2, juce::Colour(0x55ff3333));
@@ -456,7 +518,6 @@ void SettingsPage::paint(juce::Graphics& g)
     g.setGradientFill(grad);
     g.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 1.5f);
 
-    // Corner brackets
     g.setColour(juce::Colour(0xaaff3333));
     g.drawLine(bounds.getX(),          bounds.getY(),           bounds.getX() + 20,    bounds.getY(),       1.5f);
     g.drawLine(bounds.getX(),          bounds.getY(),           bounds.getX(),          bounds.getY() + 20,  1.5f);
@@ -467,7 +528,6 @@ void SettingsPage::paint(juce::Graphics& g)
     g.drawLine(bounds.getRight() - 20, bounds.getBottom(),      bounds.getRight(),      bounds.getBottom(),  1.5f);
     g.drawLine(bounds.getRight(),      bounds.getBottom() - 20, bounds.getRight(),      bounds.getBottom(),  1.5f);
 
-    // Divider under title bar
     float divY = 52.0f;
     juce::ColourGradient divGrad(juce::Colours::transparentBlack, bounds.getX(), divY,
                                   juce::Colours::transparentBlack, bounds.getRight(), divY, false);
@@ -477,7 +537,6 @@ void SettingsPage::paint(juce::Graphics& g)
     g.setGradientFill(divGrad);
     g.fillRect(bounds.getX() + 28.0f, divY, bounds.getWidth() - 56.0f, 1.0f);
 
-    // Status tag
     g.setColour(juce::Colour(0x44ff3333));
     g.setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
     g.drawText("SYS:ONLINE   BUILD:v0.1.0-alpha",
@@ -491,19 +550,19 @@ void SettingsPage::resized()
 
     auto area = getLocalBounds().reduced(20);
 
-    // Title bar row
     auto titleRow = area.removeFromTop(32);
     titleLabel.setBounds(titleRow.removeFromLeft(titleRow.getWidth() - 100));
     closeButton.setBounds(titleRow.removeFromRight(80).reduced(0, 2));
-    area.removeFromTop(8); // gap below divider
+    area.removeFromTop(8);
 
-    // Bottom status strip
     area.removeFromBottom(24);
 
-    // Viewport fills remaining space
     viewport.setBounds(area);
 
-    // Size the content panel
     int contentH = computeContentHeight(content.cameraPreviewActive);
     content.setSize(area.getWidth(), juce::jmax(contentH, area.getHeight()));
+
+    // Keep the live preview component in the correct position after any resize
+    if (cameraPreviewComponent != nullptr && !content.lastPreviewBounds.isEmpty())
+        cameraPreviewComponent->setBounds(content.lastPreviewBounds);
 }
