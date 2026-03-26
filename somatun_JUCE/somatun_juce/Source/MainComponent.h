@@ -1,7 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
 
-// Forward declarations
 class LandingPage;
 class SettingsPage;
 class HelpOverlay;
@@ -16,9 +15,10 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
-    // Call these to switch screens
+    // Navigation
     void showLanding();
     void showSettings();
+    void hideSettings();
     void showHelp();
     void hideHelp();
 

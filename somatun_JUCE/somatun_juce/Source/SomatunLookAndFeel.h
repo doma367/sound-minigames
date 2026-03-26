@@ -37,6 +37,9 @@ public:
                               bool isHighlighted,
                               bool isDown) override
     {
+        if (button.getWidth() <= 0 || button.getHeight() <= 0)
+            return;
+
         auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
 
         // Card fill

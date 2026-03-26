@@ -28,11 +28,11 @@ private:
 
     // --- OMINOUS BOOT ANIMATION VARIABLES ---
     float bootTime = 0.0f;
-    const float BOOT_DELAY_1  = 1.5f;  // 1.5s of pure black
-    const float BOOT_LOGO_IN  = 3.5f;  // 2.0s for logo to slowly emerge
-    const float BOOT_LOGO_OUT = 6.0f;  // 2.5s for logo to fade back out
-    const float BOOT_DELAY_2  = 7.0f;  // 1.0s of pure black again
-    const float BOOT_UI_IN    = 9.0f;  // 2.0s for the UI to creep in
+    const float BOOT_DELAY_1  = 1.5f;
+    const float BOOT_LOGO_IN  = 3.5f;
+    const float BOOT_LOGO_OUT = 6.0f;
+    const float BOOT_DELAY_2  = 7.0f;
+    const float BOOT_UI_IN    = 9.0f;
     // ----------------------------------------
 
     void timerCallback() override;
@@ -47,10 +47,11 @@ private:
 
     MainComponent& mainComponent;
 
-    // Buttons (invisible — we draw cards manually, buttons handle clicks)
+    // Buttons (invisible game cards handle clicks; icon buttons are visible)
     juce::TextButton game1Button, game2Button, game3Button;
     juce::TextButton settingsButton { "SETTINGS" };
     juce::TextButton helpButton     { "ABOUT" };
+    juce::TextButton exitButton     { "EXIT" };
 
     SomatunLookAndFeel laf;
 
@@ -58,7 +59,7 @@ private:
     float scanlineY    = 0.0f;
     float flickerAlpha = 1.0f;
     int   flickerTimer = 0;
-    int   hoveredCard  = -1;  // 0, 1, 2 or -1
+    int   hoveredCard  = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LandingPage)
 };

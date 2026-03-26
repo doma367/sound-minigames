@@ -11,52 +11,59 @@ MainComponent::MainComponent()
     settingsPage = std::make_unique<SettingsPage>(*this);
     helpOverlay  = std::make_unique<HelpOverlay>(*this);
 
-    addChildComponent(*landingPage);
+    addAndMakeVisible(*landingPage);
     addChildComponent(*settingsPage);
     addChildComponent(*helpOverlay);
 
-    showLanding();
+    landingPage->setBounds(getLocalBounds());
 }
 
 MainComponent::~MainComponent() {}
 
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff1a1a2e)); // dark background
+    g.fillAll(juce::Colour(0xff050505));
 }
 
 void MainComponent::resized()
 {
-    if (landingPage != nullptr && landingPage->isVisible())
+    if (landingPage != nullptr)
         landingPage->setBounds(getLocalBounds());
 
+    auto overlayBounds = getLocalBounds().reduced(80, 60);
+
     if (settingsPage != nullptr && settingsPage->isVisible())
-        settingsPage->setBounds(getLocalBounds());
+        settingsPage->setBounds(overlayBounds);
 
     if (helpOverlay != nullptr && helpOverlay->isVisible())
-        helpOverlay->setBounds(getLocalBounds().reduced(100));
+        helpOverlay->setBounds(overlayBounds);
 }
 
 void MainComponent::showLanding()
 {
-    landingPage->setVisible(true);
     settingsPage->setVisible(false);
     helpOverlay->setVisible(false);
-    landingPage->setBounds(getLocalBounds());
 }
 
 void MainComponent::showSettings()
 {
-    settingsPage->setVisible(true);
-    landingPage->setVisible(false);
     helpOverlay->setVisible(false);
-    settingsPage->setBounds(getLocalBounds());
+    settingsPage->setBounds(getLocalBounds().reduced(80, 60));
+    settingsPage->initialise();
+    settingsPage->setVisible(true);
+    settingsPage->toFront(true);
+}
+
+void MainComponent::hideSettings()
+{
+    settingsPage->setVisible(false);
 }
 
 void MainComponent::showHelp()
 {
+    settingsPage->setVisible(false);
+    helpOverlay->setBounds(getLocalBounds().reduced(80, 60));
     helpOverlay->setVisible(true);
-    helpOverlay->setBounds(getLocalBounds().reduced(100));
     helpOverlay->toFront(true);
 }
 
