@@ -15,10 +15,19 @@
       <FILE id="GjMqsq" name="MainComponent.cpp" compile="1" resource="0"
             file="Source/MainComponent.cpp"/>
     </GROUP>
+    <FILE id="hu6Vce" name="Fleshsynthpage.cpp" compile="1" resource="0"
+          file="Source/Fleshsynthpage.cpp"/>
+    <FILE id="zDm1PO" name="Fleshsynthpage.h" compile="0" resource="0"
+          file="Source/Fleshsynthpage.h"/>
     <FILE id="PCKQJo" name="HelpOverlay.cpp" compile="1" resource="0" file="Source/HelpOverlay.cpp"/>
     <FILE id="ydxo7D" name="HelpOverlay.h" compile="0" resource="0" file="Source/HelpOverlay.h"/>
     <FILE id="UnQVdd" name="LandingPage.cpp" compile="1" resource="0" file="Source/LandingPage.cpp"/>
     <FILE id="ZnBIaM" name="LandingPage.h" compile="0" resource="0" file="Source/LandingPage.h"/>
+    <FILE id="lzG8gL" name="libpose_api.dylib" compile="0" resource="1"
+          file="Source/libpose_api.dylib"/>
+    <FILE id="EHj5KL" name="pose_api.h" compile="0" resource="0" file="Source/pose_api.h"/>
+    <FILE id="sMYVky" name="Posetracker.cpp" compile="1" resource="0" file="Source/Posetracker.cpp"/>
+    <FILE id="XkKV5l" name="Posetracker.h" compile="0" resource="0" file="Source/Posetracker.h"/>
     <FILE id="JchB0B" name="SettingsPage.cpp" compile="1" resource="0"
           file="Source/SettingsPage.cpp"/>
     <FILE id="bzZiht" name="SettingsPage.h" compile="0" resource="0" file="Source/SettingsPage.h"/>
@@ -42,7 +51,7 @@
                bigIcon="vVcre0">
       <CONFIGURATIONS>
         <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce"/>
-        <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce" headerPath="/opt/homebrew/include/opencv4"/>
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../../JUCE/modules"/>

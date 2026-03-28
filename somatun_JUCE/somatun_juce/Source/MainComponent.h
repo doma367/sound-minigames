@@ -4,6 +4,7 @@
 class LandingPage;
 class SettingsPage;
 class HelpOverlay;
+class FleshSynthPage;
 
 //==============================================================================
 class MainComponent : public juce::Component
@@ -12,8 +13,8 @@ public:
     MainComponent();
     ~MainComponent() override;
 
-    void paint(juce::Graphics&) override;
-    void resized() override;
+    void paint   (juce::Graphics&) override;
+    void resized () override;
 
     // Navigation
     void showLanding();
@@ -21,11 +22,13 @@ public:
     void hideSettings();
     void showHelp();
     void hideHelp();
+    void launchMode (int cardIndex);   // 0 = FleshSynth, 1 = Pulsefield, 2 = Dualcast
 
 private:
-    std::unique_ptr<LandingPage>   landingPage;
-    std::unique_ptr<SettingsPage>  settingsPage;
-    std::unique_ptr<HelpOverlay>   helpOverlay;
+    std::unique_ptr<LandingPage>    landingPage;
+    std::unique_ptr<SettingsPage>   settingsPage;
+    std::unique_ptr<HelpOverlay>    helpOverlay;
+    std::unique_ptr<FleshSynthPage> fleshSynthPage;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

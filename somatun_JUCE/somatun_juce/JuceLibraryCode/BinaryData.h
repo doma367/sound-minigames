@@ -14,8 +14,11 @@ namespace BinaryData
     extern const char*   somatun_logo_png;
     const int            somatun_logo_pngSize = 2330182;
 
+    extern const char*   libpose_api_dylib;
+    const int            libpose_api_dylibSize = 12261904;
+
     // Number of elements in the namedResourceList and originalFileNames arrays.
-    const int namedResourceListSize = 2;
+    const int namedResourceListSize = 3;
 
     // Points to the start of a list of resource names.
     extern const char* namedResourceList[];
