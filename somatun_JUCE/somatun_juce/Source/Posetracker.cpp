@@ -24,7 +24,7 @@
 //  15=LEFT_WRIST     16=RIGHT_WRIST
 
 #include "PoseTracker.h"
-#include "FleshSynthPage.h"   // PoseFrame, PoseLandmark
+#include "FleshSynthPage.h"   // PoseFrame, BodyLandmark
 
 // pose_dylib plain C API
 #include "pose_api.h"
@@ -85,8 +85,8 @@ void PoseTracker::run()
 {
     // ---- Create pose tracker via dylib C API ----
     // Pass nullptr to use the model bundled inside the dylib
-    PoseTrackerOpaque* tracker = pose_tracker_create (nullptr);
-    if (tracker == nullptr)
+    ::PoseTracker* apiTracker = pose_tracker_create(nullptr);
+    if (apiTracker == nullptr)
     {
         DBG ("PoseTracker: pose_tracker_create() returned null");
         return;
@@ -97,7 +97,7 @@ void PoseTracker::run()
     if (! cap.isOpened())
     {
         DBG ("PoseTracker: could not open camera " << cameraIndex);
-        pose_tracker_destroy (tracker);
+        pose_tracker_destroy (apiTracker);
         return;
     }
     cap.set (cv::CAP_PROP_FRAME_WIDTH,  640);
@@ -131,11 +131,17 @@ void PoseTracker::run()
         const int stride = (int) frameRGBA.step;          // bytes per row
 
         // ---- Run inference ----
+        cv::Mat frameRGB;
+        cv::cvtColor (frameBGR, frameRGB, cv::COLOR_BGR2RGB);
+
+        PoseLandmark landmarks[33] {};
+
         const int detected = pose_tracker_process (
-            tracker,
-            w, h, stride,
-            frameRGBA.data,
-            landmarkBuf);
+            apiTracker,
+            frameRGB.data,
+            frameRGB.cols,
+            frameRGB.rows,
+            landmarks);
 
         // ---- Pack result into PoseFrame ----
         PoseFrame pf;
@@ -145,10 +151,8 @@ void PoseTracker::run()
         {
             for (int i = 0; i < kLandmarkCount; ++i)
             {
-                // Layout: x y z visibility presence  (5 floats per landmark)
-                pf.lm[i].x = landmarkBuf[i * kFloatsPerLandmark + 0];
-                pf.lm[i].y = landmarkBuf[i * kFloatsPerLandmark + 1];
-                // z and visibility are available if needed later
+                pf.lm[i].x = landmarks[i].x;
+                pf.lm[i].y = landmarks[i].y;
             }
         }
 
@@ -157,5 +161,5 @@ void PoseTracker::run()
 
     // ---- Clean shutdown ----
     cap.release();
-    pose_tracker_destroy (tracker);
+    pose_tracker_destroy (apiTracker);
 }

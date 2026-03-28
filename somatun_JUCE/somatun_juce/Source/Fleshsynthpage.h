@@ -7,9 +7,9 @@ class MainComponent;
 // ============================================================
 //  Shared pose data exchanged between camera thread and UI
 // ============================================================
-struct PoseLandmark
+struct BodyLandmark
 {
-    float x { 0.0f };   // normalised 0-1
+    float x { 0.0f };
     float y { 0.0f };
 };
 
@@ -25,7 +25,7 @@ struct PoseFrame
     static constexpr int LEFT_WRIST    = 15;
     static constexpr int RIGHT_WRIST   = 16;
 
-    PoseLandmark lm[33] {};
+    BodyLandmark lm[33] {};
     bool valid { false };
 };
 

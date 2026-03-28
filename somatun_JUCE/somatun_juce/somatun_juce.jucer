@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <JUCERPROJECT id="XSCRzK" name="somatun_juce" projectType="guiapp" useAppConfig="0"
-              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" bundleIdentifier="com.yourcompany.somatunjuce">
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" bundleIdentifier="com.yourcompany.somatunjuce"
+              headerPath="/opt/homebrew/opt/opencv/include/opencv4">
   <MAINGROUP id="e5MxLg" name="somatun_juce">
     <GROUP id="{DC48F4E6-5D95-C22F-9250-23864C985E70}" name="Assets">
       <FILE id="vVcre0" name="somatun_icon.png" compile="0" resource="1"
@@ -23,8 +24,6 @@
     <FILE id="ydxo7D" name="HelpOverlay.h" compile="0" resource="0" file="Source/HelpOverlay.h"/>
     <FILE id="UnQVdd" name="LandingPage.cpp" compile="1" resource="0" file="Source/LandingPage.cpp"/>
     <FILE id="ZnBIaM" name="LandingPage.h" compile="0" resource="0" file="Source/LandingPage.h"/>
-    <FILE id="lzG8gL" name="libpose_api.dylib" compile="0" resource="1"
-          file="Source/libpose_api.dylib"/>
     <FILE id="EHj5KL" name="pose_api.h" compile="0" resource="0" file="Source/pose_api.h"/>
     <FILE id="sMYVky" name="Posetracker.cpp" compile="1" resource="0" file="Source/Posetracker.cpp"/>
     <FILE id="XkKV5l" name="Posetracker.h" compile="0" resource="0" file="Source/Posetracker.h"/>
@@ -48,10 +47,12 @@
   <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1" JUCE_USE_CAMERA="1"/>
   <EXPORTFORMATS>
     <XCODE_MAC targetFolder="Builds/MacOSX" cameraPermissionNeeded="1" smallIcon="XcQI2H"
-               bigIcon="vVcre0">
+               bigIcon="vVcre0" extraLinkerFlags="-lopencv_core -lopencv_imgproc -lopencv_videoio -lpose_api">
       <CONFIGURATIONS>
-        <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce"/>
-        <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce" headerPath="/opt/homebrew/include/opencv4"/>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce" headerPath="/opt/homebrew/opt/opencv/include/opencv4"
+                       libraryPath="/opt/homebrew/opt/opencv/lib&#10;/opt/homebrew/lib"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce" headerPath="/opt/homebrew/opt/opencv/include/opencv4"
+                       libraryPath="/opt/homebrew/opt/opencv/lib&#10;/opt/homebrew/lib"/>
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../../JUCE/modules"/>
