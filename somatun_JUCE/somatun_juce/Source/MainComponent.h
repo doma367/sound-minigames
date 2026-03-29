@@ -30,5 +30,7 @@ private:
     std::unique_ptr<HelpOverlay>    helpOverlay;
     std::unique_ptr<FleshSynthPage> fleshSynthPage;
 
+    juce::ChildProcess visionProcess;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

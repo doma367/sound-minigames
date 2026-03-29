@@ -14,8 +14,11 @@ namespace BinaryData
     extern const char*   somatun_logo_png;
     const int            somatun_logo_pngSize = 2330182;
 
+    extern const char*   somatun_vision_py;
+    const int            somatun_vision_pySize = 1005;
+
     // Number of elements in the namedResourceList and originalFileNames arrays.
-    const int namedResourceListSize = 2;
+    const int namedResourceListSize = 3;
 
     // Points to the start of a list of resource names.
     extern const char* namedResourceList[];

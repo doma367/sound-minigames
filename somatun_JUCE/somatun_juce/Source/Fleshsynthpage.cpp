@@ -31,10 +31,21 @@ FleshSynthPage::FleshSynthPage (MainComponent& mc)
 
     // Pre-size wave buffers
     currentWave.assign (512, 0.0f);
-    prevWaveNorm.assign (6, 0.0f);
+    prevWaveNorm.assign (512, 0.0f);
 
     audio.playBuf.assign (512, 0.0f);
     audio.snapBuf.assign (512, 0.0f);
+
+    // ---- OSC receiver: listen on port 9000 ----
+    if (osc.connect (9000))
+    {
+        osc.addListener (this);
+        DBG ("OSC receiver connected on port 9000");
+    }
+    else
+    {
+        DBG ("[ERROR] could not bind OSC port 9000");
+    }
 }
 
 FleshSynthPage::~FleshSynthPage()
@@ -44,44 +55,44 @@ FleshSynthPage::~FleshSynthPage()
 }
 
 // ============================================================
+//  start / stop
+// ============================================================
 void FleshSynthPage::start()
 {
-    // --- Camera ---
-    auto devices = juce::CameraDevice::getAvailableDevices();
-    if (! devices.isEmpty())
-    {
-        cameraDevice.reset (juce::CameraDevice::openDevice (0));
-        if (cameraDevice != nullptr)
-            cameraDevice->addListener (&cameraView);
-    }
-
+    // --- Video receiver (TCP frames from Python) ---
+    videoReceiver.startReceiver();
+ 
     // --- Audio ---
     deviceManager.initialiseWithDefaultDevices (0, 2);
     deviceManager.addAudioCallback (this);
-
+ 
     startTimerHz (40);
 }
 
 void FleshSynthPage::stop()
 {
     stopTimer();
+ 
+    videoReceiver.stopReceiver();
+ 
     deviceManager.removeAudioCallback (this);
     deviceManager.closeAudioDevice();
-
-    if (cameraDevice != nullptr)
-    {
-        cameraDevice->removeListener (&cameraView);
-        cameraDevice.reset();
-    }
 }
 
 // ============================================================
-//  Pose update — called from any thread (tracker / stub)
+//  OSC callback — receives /pose message from Python
 // ============================================================
-void FleshSynthPage::updatePose (const PoseFrame& pf)
+void FleshSynthPage::oscMessageReceived (const juce::OSCMessage& m)
 {
-    const juce::ScopedLock sl (poseLock);
-    latestPose = pf;
+    if (m.getAddressPattern().toString() != "/pose")
+        return;
+
+    const int n = juce::jmin (m.size(), kNumFloats);
+    for (int i = 0; i < n; ++i)
+    {
+        if (m[i].isFloat32())
+            oscLandmarks[i].store (m[i].getFloat32(), std::memory_order_relaxed);
+    }
 }
 
 // ============================================================
@@ -89,11 +100,15 @@ void FleshSynthPage::updatePose (const PoseFrame& pf)
 // ============================================================
 void FleshSynthPage::timerCallback()
 {
+    // ---- Pull latest pose data from atomic buffer ----
     PoseFrame pf;
+    for (int i = 0; i < kNumLandmarks; ++i)
     {
-        const juce::ScopedLock sl (poseLock);
-        pf = latestPose;
+        pf.lm[i].x = oscLandmarks[i * 2    ].load (std::memory_order_relaxed);
+        pf.lm[i].y = oscLandmarks[i * 2 + 1].load (std::memory_order_relaxed);
     }
+    // Simple validity check: landmark 0 x must be a real normalised coordinate
+    pf.valid = (pf.lm[0].x > 0.01f && pf.lm[0].x < 0.99f);
 
     int cw = cameraRect.getWidth();
     int ch = cameraRect.getHeight();
@@ -168,7 +183,7 @@ void FleshSynthPage::timerCallback()
 
     oscFreq = baseFreqSmooth * pitchFactor;
 
-    // Push frequency to audio state
+    // Push frequency + waveform snapshot to audio state
     {
         const juce::ScopedLock sl (audio.lock);
         audio.oscFreq = oscFreq;
@@ -281,7 +296,7 @@ void FleshSynthPage::audioDeviceIOCallbackWithContext (
     int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
-    // Grab a snapshot of the wave + freq under lock
+    // Morph playBuf toward the latest snapBuf under lock
     {
         const juce::ScopedLock sl (audio.lock);
         if (audio.snapBuf.size() == audio.playBuf.size() && ! audio.snapBuf.empty())
@@ -302,14 +317,14 @@ void FleshSynthPage::audioDeviceIOCallbackWithContext (
         return;
     }
 
-    double oscF = audio.oscFreq;                      // read without lock (double is atomic enough)
+    double oscF     = audio.oscFreq;   // double reads are atomic enough here
     double phaseInc = (oscF * n) / audio.sampleRate;
 
     for (int i = 0; i < numSamples; ++i)
     {
-        int    idx   = (int) audio.phase % n;
-        double frac  = audio.phase - (int) audio.phase;
-        int    nxt   = (idx + 1) % n;
+        int    idx  = (int) audio.phase % n;
+        double frac = audio.phase - (int) audio.phase;
+        int    nxt  = (idx + 1) % n;
 
         float s = wave[idx] * (float)(1.0 - frac) + wave[nxt] * (float) frac;
 
@@ -364,9 +379,10 @@ void FleshSynthPage::paint (juce::Graphics& g)
     {
         g.setColour (FS_BORDER_DIM);
         g.drawRect  (cameraRect.toFloat(), 1.0f);
-
-        // Overlay — joints and wave polyline
-        drawOverlay (g);
+ 
+        // Overlay drawing disabled — Python draws joints directly onto
+        // the camera frame. drawOverlay() still exists for its data logic.
+        // drawOverlay (g);
     }
 
     // Wave panel
@@ -402,7 +418,7 @@ void FleshSynthPage::drawOverlay (juce::Graphics& g)
                 (float)(ox + re.x), (float)(oy + re.y), 2.0f);
 
     // Controlling ear highlight
-    bool leftLower = (le.y > re.y);
+    bool leftLower  = (le.y > re.y);
     bool leftActive = tiltInvert ? !leftLower : leftLower;
     auto drawEar = [&](JointPixel ep, bool active)
     {
@@ -465,28 +481,24 @@ void FleshSynthPage::drawOverlay (juce::Graphics& g)
 // ============================================================
 void FleshSynthPage::drawWavePanel (juce::Graphics& g, juce::Rectangle<int> bounds)
 {
-    // Dark background
     g.setColour (juce::Colour (0xff000000));
     g.fillRect  (bounds);
 
-    // Grid
     g.setColour (juce::Colour (0x22ff3333));
     for (int x = bounds.getX(); x < bounds.getRight();  x += 40) g.drawVerticalLine  (x, (float) bounds.getY(), (float) bounds.getBottom());
     for (int y = bounds.getY(); y < bounds.getBottom(); y += 40) g.drawHorizontalLine (y, (float) bounds.getX(), (float) bounds.getRight());
 
-    // Border
     g.setColour (FS_BORDER_DIM);
     g.drawRect  (bounds.toFloat(), 1.0f);
 
-    // Label
     g.setColour (FS_ACCENT);
     g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
     g.drawText  ("WAVEFORM", bounds.getX() + 6, bounds.getY() + 4, 80, 12, juce::Justification::centredLeft);
 
     if (currentWave.empty()) return;
 
-    float cx = (float) bounds.getX();
-    float cy = (float) bounds.getCentreY();
+    float cx  = (float) bounds.getX();
+    float cy  = (float) bounds.getCentreY();
     float amp = (float) bounds.getHeight() * 0.42f;
     float ww  = (float) bounds.getWidth();
 
@@ -512,14 +524,13 @@ void FleshSynthPage::drawWavePanel (juce::Graphics& g, juce::Rectangle<int> boun
 // ============================================================
 void FleshSynthPage::drawSidebar (juce::Graphics& g, juce::Rectangle<int> bounds)
 {
-    // Background
     g.setColour (juce::Colour (0xff141414));
     g.fillRect  (bounds);
     g.setColour (FS_BORDER_DIM);
     g.drawRect  (bounds.toFloat(), 1.0f);
 
-    int sh = bounds.getHeight();
-    int sw = bounds.getWidth();
+    int sh     = bounds.getHeight();
+    int sw     = bounds.getWidth();
     int scopeH = sh / 2;
 
     // ---- Scope (top half) ----
@@ -537,10 +548,10 @@ void FleshSynthPage::drawSidebar (juce::Graphics& g, juce::Rectangle<int> bounds
 
     if (! currentWave.empty())
     {
-        float cx   = (float) scopeBounds.getX() + 10.0f;
-        float cy   = (float) scopeBounds.getCentreY();
-        float amp  = (float)(scopeH / 2 - 10);
-        float ww   = (float)(sw - 20);
+        float cx  = (float) scopeBounds.getX() + 10.0f;
+        float cy  = (float) scopeBounds.getCentreY();
+        float amp = (float)(scopeH / 2 - 10);
+        float ww  = (float)(sw - 20);
 
         float maxA = 1e-6f;
         for (float s : currentWave) maxA = std::max (maxA, std::abs (s));
@@ -560,21 +571,16 @@ void FleshSynthPage::drawSidebar (juce::Graphics& g, juce::Rectangle<int> bounds
     // ---- Sliders (bottom half) ----
     int sliderAreaY = bounds.getY() + scopeH;
     int sliderAreaH = sh - scopeH;
-    int margin = 20;
+    int margin      = 20;
 
     int freqY = sliderAreaY + sliderAreaH / 3;
     int tiltY = sliderAreaY + 2 * sliderAreaH / 3;
 
-    freqTrackRect = { bounds.getX() + margin, freqY - 15,
-                      sw - margin * 2, 30 };
-    tiltTrackRect = { bounds.getX() + margin, tiltY - 15,
-                      sw - margin * 2, 30 };
+    freqTrackRect = { bounds.getX() + margin, freqY - 15, sw - margin * 2, 30 };
+    tiltTrackRect = { bounds.getX() + margin, tiltY - 15, sw - margin * 2, 30 };
 
-    // Freq slider
-    drawSlider (g, "FREQ", freqTrackRect, freqSliderNorm, FS_WAVE_COL,
-                oscFreq, " Hz");
+    drawSlider (g, "FREQ", freqTrackRect, freqSliderNorm, FS_WAVE_COL, oscFreq, " Hz");
 
-    // Tilt slider
     float maxSt = tiltSliderNorm * TILT_MAX_RANGE_ST;
     drawSlider (g, "TILT RANGE", tiltTrackRect, tiltSliderNorm,
                 juce::Colour (0xff00c8ff), maxSt, " st");
@@ -613,18 +619,15 @@ void FleshSynthPage::drawSlider (juce::Graphics& g,
     int tx = track.getX(), ty = track.getCentreY();
     int t1 = track.getRight();
 
-    // Label + value
     g.setColour (FS_TEXT_DIM);
     g.setFont   (juce::Font (juce::FontOptions().withHeight (10.0f)));
     g.drawText  (label + ": " + juce::String (displayVal, 1) + unit,
                  tx, ty - 26, track.getWidth(), 16,
                  juce::Justification::centredLeft);
 
-    // Track line
     g.setColour (juce::Colour (0xff505050));
     g.drawLine  ((float) tx, (float) ty, (float) t1, (float) ty, 3.0f);
 
-    // Knob
     int kx = tx + (int)(normVal * (float)(t1 - tx));
     g.setColour (colour);
     g.fillEllipse ((float)(kx - 10), (float)(ty - 10), 20.0f, 20.0f);
@@ -639,13 +642,7 @@ void FleshSynthPage::resized()
 {
     int w = getWidth(), h = getHeight();
 
-    // Back button — top-right
     backButton.setBounds (w - 100, 8, 80, 26);
-
-    // Layout (matching Python prototype proportions):
-    //   Camera  : left portion, full height minus header/status/wave-panel
-    //   Wave    : below camera, full left-portion width, ~120px
-    //   Sidebar : right ~220px, full height
 
     int headerH = 40;
     int statusH = 28;
@@ -656,9 +653,9 @@ void FleshSynthPage::resized()
     int camW = w - sideW;
     int camH = h - headerH - statusH - waveH;
 
-    cameraRect   = { camX,       camY,       camW,  camH };
-    wavePanelRect= { camX,       camY + camH, camW, waveH };
-    sidebarRect  = { camX + camW, camY,       sideW, h - headerH - statusH };
+    cameraRect    = { camX,        camY,       camW,  camH  };
+    wavePanelRect = { camX,        camY + camH, camW, waveH };
+    sidebarRect   = { camX + camW, camY,        sideW, h - headerH - statusH };
 
     cameraView.setBounds (cameraRect);
 }
@@ -670,9 +667,9 @@ void FleshSynthPage::mouseDown (const juce::MouseEvent& e)
 {
     auto pt = e.getPosition();
 
-    if (freqTrackRect.contains (pt))      { dragging = DragTarget::Freq; }
+    if      (freqTrackRect.contains (pt)) { dragging = DragTarget::Freq; }
     else if (tiltTrackRect.contains (pt)) { dragging = DragTarget::Tilt; }
-    else if (toggleRect.contains (pt))    { tiltInvert = !tiltInvert; repaint(); }
+    else if (toggleRect.contains    (pt)) { tiltInvert = !tiltInvert; repaint(); }
 }
 
 void FleshSynthPage::mouseDrag (const juce::MouseEvent& e)
@@ -683,10 +680,8 @@ void FleshSynthPage::mouseDrag (const juce::MouseEvent& e)
         return juce::jlimit (0.0f, 1.0f, t);
     };
 
-    if (dragging == DragTarget::Freq)
-        freqSliderNorm = updateNorm (e.getPosition().x, freqTrackRect);
-    else if (dragging == DragTarget::Tilt)
-        tiltSliderNorm = updateNorm (e.getPosition().x, tiltTrackRect);
+    if      (dragging == DragTarget::Freq) freqSliderNorm = updateNorm (e.getPosition().x, freqTrackRect);
+    else if (dragging == DragTarget::Tilt) tiltSliderNorm = updateNorm (e.getPosition().x, tiltTrackRect);
 }
 
 void FleshSynthPage::mouseUp (const juce::MouseEvent&)

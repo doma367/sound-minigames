@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <juce_osc/juce_osc.h>
 #include "SomatunLookAndFeel.h"
 
 class MainComponent;
@@ -16,14 +17,14 @@ struct BodyLandmark
 struct PoseFrame
 {
     // Indices match MediaPipe: 11=LS,12=RS,13=LE,14=RE,15=LW,16=RW, 7=LE(ar),8=RE(ar)
-    static constexpr int LEFT_EAR      =  7;
-    static constexpr int RIGHT_EAR     =  8;
-    static constexpr int LEFT_SHOULDER = 11;
-    static constexpr int RIGHT_SHOULDER= 12;
-    static constexpr int LEFT_ELBOW    = 13;
-    static constexpr int RIGHT_ELBOW   = 14;
-    static constexpr int LEFT_WRIST    = 15;
-    static constexpr int RIGHT_WRIST   = 16;
+    static constexpr int LEFT_EAR       =  7;
+    static constexpr int RIGHT_EAR      =  8;
+    static constexpr int LEFT_SHOULDER  = 11;
+    static constexpr int RIGHT_SHOULDER = 12;
+    static constexpr int LEFT_ELBOW     = 13;
+    static constexpr int RIGHT_ELBOW    = 14;
+    static constexpr int LEFT_WRIST     = 15;
+    static constexpr int RIGHT_WRIST    = 16;
 
     BodyLandmark lm[33] {};
     bool valid { false };
@@ -77,20 +78,19 @@ private:
 };
 
 // ============================================================
-//  Camera frame display — shows raw pixel data from camera
+//  Camera frame display — receives frames pushed from VideoReceiver
 // ============================================================
-class CameraView : public juce::Component,
-                   public juce::CameraDevice::Listener
+class CameraView : public juce::Component
 {
 public:
     CameraView() = default;
 
-    // CameraDevice::Listener
-    void imageReceived (const juce::Image& img) override
+    // Called from the message thread
+    void pushFrame (const juce::Image& img)
     {
         {
             const juce::ScopedLock sl (lock);
-            latest = img.createCopy();
+            latest = img;
         }
         repaint();
     }
@@ -104,16 +104,122 @@ public:
                          juce::RectanglePlacement::centred | juce::RectanglePlacement::fillDestination);
     }
 
-    // Overlay drawing (joints + wave polyline) is painted separately by FleshSynthPage
-    juce::Image getLatest()
-    {
-        const juce::ScopedLock sl (lock);
-        return latest;
-    }
-
 private:
     juce::Image latest;
     juce::CriticalSection lock;
+};
+
+// ============================================================
+//  VideoReceiver — background thread that reads JPEG frames
+//  from somatun_vision.py over a TCP socket on localhost:9001.
+//
+//  Frame format (written by Python's VideoServer):
+//    [4 bytes big-endian uint32 = JPEG length] [JPEG bytes]
+// ============================================================
+class VideoReceiver : public juce::Thread
+{
+public:
+    explicit VideoReceiver (CameraView& view)
+        : juce::Thread ("VideoReceiver"), cameraView (view) {}
+
+    ~VideoReceiver() override { stopReceiver(); }
+
+    void startReceiver()
+    {
+        startThread();
+    }
+
+    void stopReceiver()
+    {
+        // Signal the thread and force the blocking socket read to unblock
+        signalThreadShouldExit();
+        if (auto* s = streamSocket.load())
+            s->close();
+        stopThread (2000);
+    }
+
+private:
+    // ---- Helpers ----
+    static bool readExact (juce::StreamingSocket& sock, void* buf, int numBytes)
+    {
+        auto* p = static_cast<char*> (buf);
+        int remaining = numBytes;
+        while (remaining > 0)
+        {
+            int got = sock.read (p, remaining, true);
+            if (got <= 0) return false;
+            p         += got;
+            remaining -= got;
+        }
+        return true;
+    }
+
+    // ---- Thread entry point ----
+    void run() override
+    {
+        constexpr int kPort           = 9001;
+        constexpr int kRetryMs        = 1000;
+        constexpr int kMaxFrameBytes  = 4 * 1024 * 1024;   // 4 MB sanity cap
+
+        while (! threadShouldExit())
+        {
+            auto sock = std::make_unique<juce::StreamingSocket>();
+            streamSocket = sock.get();
+
+            DBG ("[VideoReceiver] connecting to 127.0.0.1:" + juce::String (kPort));
+
+            if (! sock->connect ("127.0.0.1", kPort, 2000))
+            {
+                streamSocket = nullptr;
+                wait (kRetryMs);
+                continue;
+            }
+
+            DBG ("[VideoReceiver] connected");
+
+            while (! threadShouldExit())
+            {
+                // Read 4-byte big-endian length
+                uint8_t hdr[4];
+                if (! readExact (*sock, hdr, 4))
+                    break;
+
+                uint32_t len = ((uint32_t) hdr[0] << 24) | ((uint32_t) hdr[1] << 16)
+                             | ((uint32_t) hdr[2] <<  8) |  (uint32_t) hdr[3];
+
+                if (len == 0 || len > (uint32_t) kMaxFrameBytes)
+                    break;
+
+                // Read JPEG payload
+                juce::MemoryBlock mb (len);
+                if (! readExact (*sock, mb.getData(), (int) len))
+                    break;
+
+                // Decode JPEG → juce::Image
+                juce::MemoryInputStream mis (mb, false);
+                juce::JPEGImageFormat   fmt;
+                juce::Image img = fmt.decodeImage (mis);
+
+                if (img.isValid())
+                {
+                    // Deliver to CameraView on the message thread
+                    juce::MessageManager::callAsync ([this, img]()
+                    {
+                        cameraView.pushFrame (img);
+                    });
+                }
+            }
+
+            streamSocket = nullptr;
+            DBG ("[VideoReceiver] disconnected, retrying...");
+            wait (kRetryMs);
+        }
+    }
+
+    CameraView& cameraView;
+    std::atomic<juce::StreamingSocket*> streamSocket { nullptr };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VideoReceiver)
 };
 
 // ============================================================
@@ -121,14 +227,15 @@ private:
 // ============================================================
 class FleshSynthPage : public juce::Component,
                        private juce::Timer,
-                       private juce::AudioIODeviceCallback
+                       private juce::AudioIODeviceCallback,
+                       private juce::OSCReceiver::Listener<juce::OSCReceiver::MessageLoopCallback>
 {
 public:
     explicit FleshSynthPage (MainComponent& mc);
     ~FleshSynthPage() override;
 
-    void start();   // open camera + audio
-    void stop();    // close camera + audio
+    void start();   // launch pose tracker + audio
+    void stop();    // shut down pose tracker + audio
 
     // juce::Component
     void paint   (juce::Graphics&) override;
@@ -137,8 +244,8 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
 
-    // Called externally with a new pose (from a background tracker thread or stub)
-    void updatePose (const PoseFrame& pf);
+    // OSC receiver callback
+    void oscMessageReceived (const juce::OSCMessage& m) override;
 
 private:
     // ---- Timer (UI update @ 40 Hz) ----
@@ -205,13 +312,12 @@ private:
     juce::Rectangle<int> wavePanelRect;
     juce::Rectangle<int> sidebarRect;
 
-    // ---- Camera ----
-    std::unique_ptr<juce::CameraDevice> cameraDevice;
-    CameraView cameraView;
+    // ---- Camera view + video receiver ----
+    CameraView    cameraView;
+    VideoReceiver videoReceiver { cameraView };
 
     // ---- Pose data ----
     PoseFrame latestPose;
-    juce::CriticalSection poseLock;
 
     // ---- Overlay joint positions (pixel space inside cameraRect) ----
     struct JointPixel { int x, y; };
@@ -229,6 +335,12 @@ private:
     juce::TextButton backButton { "BACK" };
 
     MainComponent& mainComponent;
+
+    // ---- OSC receiver ----
+    juce::OSCReceiver osc;
+    static constexpr int kNumLandmarks = 33;
+    static constexpr int kNumFloats    = kNumLandmarks * 2; // x + y per landmark
+    std::atomic<float> oscLandmarks[kNumFloats]{};
 
     // Constants matching Python prototype
     static constexpr float JOINT_SMOOTH_ALPHA = 0.45f;

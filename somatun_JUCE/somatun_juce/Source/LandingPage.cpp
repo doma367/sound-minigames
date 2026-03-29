@@ -223,7 +223,6 @@ void LandingPage::drawGrid(juce::Graphics& g)
     for (int x = 0; x < getWidth();  x += 40) g.drawVerticalLine  (x, 0.0f, (float)getHeight());
     for (int y = 0; y < getHeight(); y += 40) g.drawHorizontalLine(y, 0.0f, (float)getWidth());
 }
-
 void LandingPage::drawParticles(juce::Graphics& g)
 {
     for (const auto& p : particles)

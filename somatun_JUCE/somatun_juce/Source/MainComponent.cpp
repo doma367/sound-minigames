@@ -19,9 +19,65 @@ MainComponent::MainComponent()
     addChildComponent (*fleshSynthPage);
 
     landingPage->setBounds (getLocalBounds());
+
+    // ---- launch Python vision helper ----
+    juce::File appBundle = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
+    juce::File scriptInBundle = appBundle.getChildFile ("Contents/Resources/somatun_vision.py");
+
+    DBG ("App bundle path: " + appBundle.getFullPathName());
+    DBG ("Looking for vision script in bundle at: " + scriptInBundle.getFullPathName());
+
+    juce::File scriptToRun = scriptInBundle;
+
+    if (! scriptInBundle.existsAsFile())
+    {
+        // Fallback to running directly from the source tree (dev setup)
+        juce::File scriptInSource ("/Users/doma367/sound-minigames/somatun_JUCE/somatun_juce/somatun_vision.py");
+        DBG ("Bundle script not found. Checking source path: " + scriptInSource.getFullPathName());
+
+        if (scriptInSource.existsAsFile())
+        {
+            scriptToRun = scriptInSource;
+            DBG ("Using source-tree vision script: " + scriptToRun.getFullPathName());
+        }
+        else
+        {
+            DBG ("[ERROR] somatun_vision.py not found in bundle AND not at source path.");
+            DBG ("Expected bundle path: " + scriptInBundle.getFullPathName());
+            DBG ("Expected source path:  " + scriptInSource.getFullPathName());
+        }
+    }
+
+    if (scriptToRun.existsAsFile())
+    {
+        juce::String pythonPath = "/Users/doma367/sound-minigames/.venv/bin/python";
+
+        juce::StringArray cmd;
+        cmd.add (pythonPath);
+        cmd.add (scriptToRun.getFullPathName());
+
+        DBG ("Launching vision helper with: " + cmd.joinIntoString (" "));
+
+        if (visionProcess.start (cmd))
+        {
+            DBG ("Vision helper launched successfully using venv Python");
+        }
+        else
+        {
+            DBG ("[ERROR] ChildProcess::start failed to launch the vision helper.");
+        }
+    }
+    else
+    {
+        DBG ("[ERROR] No valid somatun_vision.py found to run.");
+    }
 }
 
-MainComponent::~MainComponent() {}
+MainComponent::~MainComponent()
+{
+    if (visionProcess.isRunning())
+        visionProcess.kill();
+}
 
 void MainComponent::paint (juce::Graphics& g)
 {
