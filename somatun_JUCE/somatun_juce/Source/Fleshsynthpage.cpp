@@ -20,7 +20,32 @@ FleshSynthPage::FleshSynthPage (MainComponent& mc)
 {
     setLookAndFeel (&laf);
 
+    // cameraView is a child component — we need to draw the trail and
+    // overlay ABOVE it, so we place a transparent overlay component on
+    // top.  Simplest approach: just set cameraView to not intercept
+    // painting order, and call repaint() on the parent.  The trail /
+    // overlay are drawn in the parent's paint() AFTER cameraView has
+    // already composited itself — but because cameraView is a child,
+    // JUCE paints children on top of the parent.  To get our drawing
+    // on top we make cameraView paint into its own layer and we draw
+    // our overlays by calling drawTrail / drawOverlay in a component
+    // that sits above cameraView in the Z-order.  The cleanest fix
+    // without restructuring the component tree: promote cameraView to
+    // be NOT a visible JUCE child and instead call cameraView.paint()
+    // manually from our paint() — but that breaks mouse/resize.
+    //
+    // Chosen fix: keep cameraView as child, but add an invisible
+    // overlay panel (overlayView) that sits on top and forwards all
+    // trail/overlay drawing to us via a lambda.
     addAndMakeVisible (cameraView);
+    addAndMakeVisible (overlayView);   // sits above cameraView in Z-order
+    overlayView.setInterceptsMouseClicks (false, false);
+    overlayView.onPaint = [this](juce::Graphics& g)
+    {
+        drawTrail    (g);
+        drawOverlay  (g);
+        drawParticles(g);
+    };
 
     backButton.onClick = [this]
     {
@@ -100,21 +125,18 @@ void FleshSynthPage::oscMessageReceived (const juce::OSCMessage& m)
 // ============================================================
 void FleshSynthPage::timerCallback()
 {
-    // ---- Pull latest pose data from atomic buffer ----
     PoseFrame pf;
     for (int i = 0; i < kNumLandmarks; ++i)
     {
         pf.lm[i].x = oscLandmarks[i * 2    ].load (std::memory_order_relaxed);
         pf.lm[i].y = oscLandmarks[i * 2 + 1].load (std::memory_order_relaxed);
     }
-    // Simple validity check: landmark 0 x must be a real normalised coordinate
     pf.valid = (pf.lm[0].x > 0.01f && pf.lm[0].x < 0.99f);
 
     int cw = cameraRect.getWidth();
     int ch = cameraRect.getHeight();
     if (cw <= 0 || ch <= 0) { repaint(); return; }
 
-    // ---- Ordered body point indices: RW RE RS LS LE LW ----
     static const int ORDER[6] = {
         PoseFrame::RIGHT_WRIST, PoseFrame::RIGHT_ELBOW, PoseFrame::RIGHT_SHOULDER,
         PoseFrame::LEFT_SHOULDER, PoseFrame::LEFT_ELBOW, PoseFrame::LEFT_WRIST
@@ -122,75 +144,81 @@ void FleshSynthPage::timerCallback()
 
     if (pf.valid)
     {
-        // Raw pixel positions
-        float rawX[6], rawY[6];
+        // 1. Smooth all joints for the visual skeleton
+        float rawX[6], rawY[6], sX[6], sY[6];
         for (int i = 0; i < 6; ++i)
         {
             rawX[i] = pf.lm[ORDER[i]].x * (float) cw;
             rawY[i] = pf.lm[ORDER[i]].y * (float) ch;
         }
-
-        float sX[6], sY[6];
         smoothJoints (rawX, rawY, sX, sY);
 
+        // 2. Count joints actually inside the frame boundaries
+        int nodesInFrame = 0;
         for (int i = 0; i < 6; ++i)
         {
             jointPx[i].x = (int) sX[i];
             jointPx[i].y = (int) sY[i];
+            if (pf.lm[ORDER[i]].x >= 0.0f && pf.lm[ORDER[i]].x <= 1.0f &&
+                pf.lm[ORDER[i]].y >= 0.0f && pf.lm[ORDER[i]].y <= 1.0f) {
+                nodesInFrame++;
+            }
         }
         hasJoints = true;
 
-        earPx[0] = { (int)(pf.lm[PoseFrame::LEFT_EAR ].x * cw),
-                     (int)(pf.lm[PoseFrame::LEFT_EAR ].y * ch) };
-        earPx[1] = { (int)(pf.lm[PoseFrame::RIGHT_EAR].x * cw),
-                     (int)(pf.lm[PoseFrame::RIGHT_EAR].y * ch) };
+        earPx[0] = { (int)(pf.lm[PoseFrame::LEFT_EAR ].x * cw), (int)(pf.lm[PoseFrame::LEFT_EAR ].y * ch) };
+        earPx[1] = { (int)(pf.lm[PoseFrame::RIGHT_EAR].x * cw), (int)(pf.lm[PoseFrame::RIGHT_EAR].y * ch) };
 
-        // ---- Wave from pose ----
-        buildWaveFromPose (pf, cw, ch);
+        // 3. Audio logic: 3+ nodes = play, <3 nodes = stop
+        if (nodesInFrame >= 3)
+        {
+            buildWaveFromPose (pf, cw, ch);
+            
+            // Push frequency + waveform snapshot to audio state
+            const juce::ScopedLock sl (audio.lock);
+            audio.oscFreq = oscFreq;
+            audio.snapBuf = currentWave; // Refill the buffer to resume sound
+        }
+        else
+        {
+            currentWave.assign (512, 0.0f);
+            const juce::ScopedLock sl (audio.lock);
+            audio.snapBuf.clear(); // Signal silence to audio thread
+        }
 
         // ---- Tilt -> pitch ----
         float headTilt = pf.lm[PoseFrame::RIGHT_EAR].y - pf.lm[PoseFrame::LEFT_EAR].y;
-        tiltRawSmooth = (1.0f - TILT_SMOOTH_ALPHA) * tiltRawSmooth
-                      +  TILT_SMOOTH_ALPHA * headTilt;
+        tiltRawSmooth = (1.0f - TILT_SMOOTH_ALPHA) * tiltRawSmooth + TILT_SMOOTH_ALPHA * headTilt;
         float tilt = tiltRawSmooth;
         if (std::abs (tilt) < TILT_DEADZONE) tilt = 0.0f;
         float tiltNorm = juce::jlimit (-1.0f, 1.0f, tilt / MAX_TILT);
-
         float tiltShaped = tiltNorm * 0.55f + (tiltNorm * tiltNorm * tiltNorm) * 0.45f;
         if (tiltInvert) tiltShaped = -tiltShaped;
 
         float maxSemitones = tiltSliderNorm * TILT_MAX_RANGE_ST;
-        float semOff       = tiltShaped * maxSemitones;
-        float targetPitch  = std::pow (2.0f, semOff / 12.0f);
-
-        pitchFactor = (1.0f - PITCH_ALPHA_TRACK) * pitchFactor
-                    +  PITCH_ALPHA_TRACK * targetPitch;
+        pitchFactor = (1.0f - PITCH_ALPHA_TRACK) * pitchFactor + PITCH_ALPHA_TRACK * std::pow (2.0f, (tiltShaped * maxSemitones) / 12.0f);
     }
     else
     {
         hasJoints = false;
-        pitchFactor = (1.0f - PITCH_ALPHA_RELAX) * pitchFactor
-                    +  PITCH_ALPHA_RELAX * 1.0f;
+        pitchFactor = (1.0f - PITCH_ALPHA_RELAX) * pitchFactor + PITCH_ALPHA_RELAX * 1.0f;
+        
+        // Ensure silence if no pose at all is valid
+        const juce::ScopedLock sl (audio.lock);
+        audio.snapBuf.clear();
     }
 
     pitchFactor = juce::jlimit (0.2f, 5.0f, pitchFactor);
-
-    // Update base frequency from slider
     baseFreq = SLIDER_MIN_FREQ + freqSliderNorm * (SLIDER_MAX_FREQ - SLIDER_MIN_FREQ);
-
-    baseFreqSmooth = (1.0f - BASE_FREQ_SMOOTH_A) * baseFreqSmooth
-                   +  BASE_FREQ_SMOOTH_A * baseFreq;
-
+    baseFreqSmooth = (1.0f - BASE_FREQ_SMOOTH_A) * baseFreqSmooth + BASE_FREQ_SMOOTH_A * baseFreq;
     oscFreq = baseFreqSmooth * pitchFactor;
 
-    // Push frequency + waveform snapshot to audio state
-    {
-        const juce::ScopedLock sl (audio.lock);
-        audio.oscFreq = oscFreq;
-        if (currentWave.size() == audio.snapBuf.size())
-            audio.snapBuf = currentWave;
-    }
+    // (Note: Removed the 'if (!audio.snapBuf.empty())' block that was here)
 
+    if (hasJoints) pushTrailFrame();
+    tickParticles();
+    spawnParticlesFromWave();
+    updateSpectrum();
     repaint();
 }
 
@@ -199,45 +227,46 @@ void FleshSynthPage::timerCallback()
 // ============================================================
 void FleshSynthPage::buildWaveFromPose (const PoseFrame& pf, int viewW, int viewH)
 {
-    // y normalised in audio space: (0.5 - lm.y) * 2 ∈ [-1, 1]
     static const int ORDER[6] = {
         PoseFrame::RIGHT_WRIST, PoseFrame::RIGHT_ELBOW, PoseFrame::RIGHT_SHOULDER,
         PoseFrame::LEFT_SHOULDER, PoseFrame::LEFT_ELBOW, PoseFrame::LEFT_WRIST
     };
 
-    float xs[6], ys[6];
+    std::vector<float> xs, ys;
     for (int i = 0; i < 6; ++i)
     {
-        xs[i] = pf.lm[ORDER[i]].x * (float) viewW;
-        ys[i] = (0.5f - pf.lm[ORDER[i]].y) * 2.0f;
+        // Only include nodes inside frame bounds
+        if (pf.lm[ORDER[i]].x >= 0.0f && pf.lm[ORDER[i]].x <= 1.0f &&
+            pf.lm[ORDER[i]].y >= 0.0f && pf.lm[ORDER[i]].y <= 1.0f)
+        {
+            xs.push_back (pf.lm[ORDER[i]].x * (float) viewW);
+            ys.push_back ((0.5f - pf.lm[ORDER[i]].y) * 2.0f);
+        }
     }
 
-    // Sort by x so we interpolate left → right
-    int idx[6] = {0,1,2,3,4,5};
-    std::sort (idx, idx+6, [&](int a, int b){ return xs[a] < xs[b]; });
+    if (xs.size() < 3) return;
 
-    float sxs[6], sys[6];
-    for (int i = 0; i < 6; ++i) { sxs[i] = xs[idx[i]]; sys[i] = ys[idx[i]]; }
+    // Sort by x to interpolate left → right
+    std::vector<int> idx (xs.size());
+    std::iota (idx.begin(), idx.end(), 0);
+    std::sort (idx.begin(), idx.end(), [&](int a, int b){ return xs[a] < xs[b]; });
 
-    float x0 = sxs[0], x5 = sxs[5];
-    float dist = std::max (x5 - x0, 1.0f);
+    std::vector<float> sxs, sys;
+    for (int i : idx) { sxs.push_back (xs[i]); sys.push_back (ys[i]); }
 
+    float x0 = sxs.front(), xSpan = std::max (sxs.back() - x0, 1.0f);
     const int N = 512;
     std::vector<float> rawWave (N);
 
     for (int i = 0; i < N; ++i)
     {
-        float t = (float) i / (float)(N - 1);
-        float wx = x0 + t * dist;
-        // Linear interpolation through the sorted control points
-        float val = sys[0];
-        for (int j = 0; j < 5; ++j)
+        float wx = x0 + ((float) i / (float)(N - 1)) * xSpan;
+        float val = sys.front();
+        for (size_t j = 0; j < sxs.size() - 1; ++j)
         {
             if (wx >= sxs[j] && wx <= sxs[j+1])
             {
-                float lt = (sxs[j+1] - sxs[j]) > 0.001f
-                         ? (wx - sxs[j]) / (sxs[j+1] - sxs[j])
-                         : 0.0f;
+                float lt = (wx - sxs[j]) / (sxs[j+1] - sxs[j]);
                 val = sys[j] * (1.0f - lt) + sys[j+1] * lt;
                 break;
             }
@@ -249,16 +278,10 @@ void FleshSynthPage::buildWaveFromPose (const PoseFrame& pf, int viewW, int view
     float rms = 0.0f;
     for (float s : rawWave) rms += s * s;
     rms = std::sqrt (rms / (float) N) + 1e-6f;
-    for (float& s : rawWave) s /= (rms * 3.0f);
-    for (float& s : rawWave) s = juce::jlimit (-1.0f, 1.0f, s);
-
-    // Smooth with previous wave
-    if (prevWaveNorm.size() != (size_t) N)
-        prevWaveNorm.assign (N, 0.0f);
+    for (float& s : rawWave) s = juce::jlimit (-1.0f, 1.0f, s / (rms * 3.0f));
 
     for (int i = 0; i < N; ++i)
-        prevWaveNorm[i] = (1.0f - WAVE_SMOOTH_ALPHA) * prevWaveNorm[i]
-                        + WAVE_SMOOTH_ALPHA * rawWave[i];
+        prevWaveNorm[i] = (1.0f - WAVE_SMOOTH_ALPHA) * prevWaveNorm[i] + WAVE_SMOOTH_ALPHA * rawWave[i];
 
     currentWave = prevWaveNorm;
 }
@@ -296,7 +319,6 @@ void FleshSynthPage::audioDeviceIOCallbackWithContext (
     int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
-    // Morph playBuf toward the latest snapBuf under lock
     {
         const juce::ScopedLock sl (audio.lock);
         if (audio.snapBuf.size() == audio.playBuf.size() && ! audio.snapBuf.empty())
@@ -305,28 +327,37 @@ void FleshSynthPage::audioDeviceIOCallbackWithContext (
                 audio.playBuf[i] = (1.0f - audio.morphAlpha) * audio.playBuf[i]
                                  +  audio.morphAlpha * audio.snapBuf[i];
         }
+        else // Silence if snapBuf is empty (fewer than 3 nodes)
+        {
+            juce::FloatVectorOperations::clear (audio.playBuf.data(), (int)audio.playBuf.size());
+        }
     }
 
     auto& wave = audio.playBuf;
     int   n    = (int) wave.size();
 
-    if (n == 0)
+    // Check if the current buffer is effectively silent
+    bool isSilent = true;
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            if (std::abs(wave[i]) > 0.0001f) { isSilent = false; break; }
+        }
+    }
+
+    if (n == 0 || isSilent)
     {
         for (int ch = 0; ch < numOutputChannels; ++ch)
             juce::FloatVectorOperations::clear (outputChannelData[ch], numSamples);
         return;
     }
 
-    double oscF     = audio.oscFreq;   // double reads are atomic enough here
-    double phaseInc = (oscF * n) / audio.sampleRate;
+    double phaseInc = (audio.oscFreq * n) / audio.sampleRate;
 
     for (int i = 0; i < numSamples; ++i)
     {
         int    idx  = (int) audio.phase % n;
         double frac = audio.phase - (int) audio.phase;
-        int    nxt  = (idx + 1) % n;
-
-        float s = wave[idx] * (float)(1.0 - frac) + wave[nxt] * (float) frac;
+        float s = wave[idx] * (float)(1.0 - frac) + wave[(idx + 1) % n] * (float) frac;
 
         for (int ch = 0; ch < numOutputChannels; ++ch)
             outputChannelData[ch][i] = s;
@@ -379,15 +410,12 @@ void FleshSynthPage::paint (juce::Graphics& g)
     {
         g.setColour (FS_BORDER_DIM);
         g.drawRect  (cameraRect.toFloat(), 1.0f);
- 
-        // Overlay drawing disabled — Python draws joints directly onto
-        // the camera frame. drawOverlay() still exists for its data logic.
-        // drawOverlay (g);
+        // NOTE: trail + overlay are drawn by overlayView (child above cameraView)
     }
 
-    // Wave panel
+    // Spectrum panel (replaces waveform)
     if (! wavePanelRect.isEmpty())
-        drawWavePanel (g, wavePanelRect);
+        drawSpectrumPanel (g, wavePanelRect);
 
     // Sidebar
     if (! sidebarRect.isEmpty())
@@ -403,120 +431,327 @@ void FleshSynthPage::paint (juce::Graphics& g)
 
 // ============================================================
 //  Overlay: joints + ear indicators + wave polyline
+//  NOTE: coordinates here are in overlayView-local space, which
+//        is identical to parent space since overlayView covers
+//        the whole component.
 // ============================================================
 void FleshSynthPage::drawOverlay (juce::Graphics& g)
 {
     if (! hasJoints) return;
 
-    auto ox = cameraRect.getX();
-    auto oy = cameraRect.getY();
+    g.saveState();
+    g.reduceClipRegion (cameraRect);
 
-    // Ear line + indicators
-    auto& le = earPx[0]; auto& re = earPx[1];
-    g.setColour (juce::Colour (0xffb4640a));
-    g.drawLine ((float)(ox + le.x), (float)(oy + le.y),
-                (float)(ox + re.x), (float)(oy + re.y), 2.0f);
+    auto ox = (float)cameraRect.getX();
+    auto oy = (float)cameraRect.getY();
 
-    // Controlling ear highlight
-    bool leftLower  = (le.y > re.y);
-    bool leftActive = tiltInvert ? !leftLower : leftLower;
-    auto drawEar = [&](JointPixel ep, bool active)
-    {
-        float cx = (float)(ox + ep.x), cy = (float)(oy + ep.y);
-        if (active)
-        {
-            g.setColour (juce::Colour (0xffff9600));
-            g.fillEllipse (cx - 12.0f, cy - 12.0f, 24.0f, 24.0f);
-            g.setColour   (juce::Colours::black);
-            g.drawEllipse (cx - 12.0f, cy - 12.0f, 24.0f, 24.0f, 3.0f);
-        }
-        else
-        {
-            g.setColour (juce::Colour (0xffa0783c));
-            g.fillEllipse (cx - 10.0f, cy - 10.0f, 20.0f, 20.0f);
-        }
+    // Count nodes in frame for the error display
+    int nodesInFrame = 0;
+    static const int ORDER[6] = { 16, 14, 12, 11, 13, 15 }; // Wrist to Wrist
+    for (int i = 0; i < 6; ++i) {
+        if (jointPx[i].x >= 0 && jointPx[i].x <= cameraRect.getWidth() &&
+            jointPx[i].y >= 0 && jointPx[i].y <= cameraRect.getHeight()) nodesInFrame++;
+    }
+
+    // --- Draw Red Skeleton ---
+    g.setColour (FS_ACCENT);
+    g.drawLine (ox + earPx[0].x, oy + earPx[0].y, ox + earPx[1].x, oy + earPx[1].y, 2.0f);
+
+    auto drawEar = [&](JointPixel ep, bool active) {
+        float cx = ox + ep.x, cy = oy + ep.y;
+        g.setColour (active ? FS_ACCENT : FS_ACCENT.withAlpha(0.4f));
+        g.fillEllipse (cx - (active ? 12.0f : 10.0f), cy - (active ? 12.0f : 10.0f), (active ? 24.0f : 20.0f), (active ? 24.0f : 20.0f));
     };
-    drawEar (le, leftActive);
-    drawEar (re, !leftActive);
+    bool leftLower = (earPx[0].y > earPx[1].y);
+    drawEar (earPx[0], tiltInvert ? !leftLower : leftLower);
+    drawEar (earPx[1], tiltInvert ? leftLower : !leftLower);
 
-    // Body joint polyline
     juce::Path jp;
-    for (int i = 0; i < 6; ++i)
-    {
-        float px = (float)(ox + jointPx[i].x);
-        float py = (float)(oy + jointPx[i].y);
-        if (i == 0) jp.startNewSubPath (px, py);
-        else        jp.lineTo          (px, py);
-
-        g.setColour (FS_WAVE_COL);
+    for (int i = 0; i < 6; ++i) {
+        float px = ox + jointPx[i].x, py = oy + jointPx[i].y;
+        if (i == 0) jp.startNewSubPath (px, py); else jp.lineTo (px, py);
+        g.setColour (FS_ACCENT);
         g.fillEllipse (px - 8.0f, py - 8.0f, 16.0f, 16.0f);
     }
-    g.setColour (FS_WAVE_COL);
-    g.strokePath (jp, juce::PathStrokeType (2.0f));
+    g.strokePath (jp, juce::PathStrokeType (2.5f));
 
-    // Wave polyline inside camera view
-    if (! currentWave.empty())
+    // --- ERROR MESSAGE ---
+    if (nodesInFrame < 3)
     {
-        float left_x  = (float) cameraRect.getX() + cameraRect.getWidth() * 0.05f;
-        float right_x = (float) cameraRect.getX() + cameraRect.getWidth() * 0.95f;
-        float width   = right_x - left_x;
-        float centerY = (float) cameraRect.getCentreY();
-        float ampPx   = cameraRect.getHeight() * 0.4f * 0.5f;
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        g.fillRect (cameraRect);
+        g.setColour (juce::Colours::white);
+        g.setFont (juce::Font (22.0f, juce::Font::bold));
+        g.drawText ("ERROR :: only " + juce::String(nodesInFrame) + " nodes detected", 
+                    cameraRect, juce::Justification::centred);
+    }
 
-        juce::Path wp;
-        for (int i = 0; i < (int) currentWave.size(); ++i)
+    g.restoreState();
+}
+
+// ============================================================
+//  Ghost trail — ring buffer of skeleton frames drawn on camera
+// ============================================================
+void FleshSynthPage::pushTrailFrame()
+{
+    auto& f = trailBuf[trailHead];
+    for (int i = 0; i < 6; ++i) f.joints[i] = jointPx[i];
+    f.ears[0] = earPx[0];
+    f.ears[1] = earPx[1];
+    f.valid   = true;
+    trailHead = (trailHead + 1) % kTrailLen;
+}
+
+void FleshSynthPage::drawTrail (juce::Graphics& g)
+{
+    if (cameraRect.isEmpty()) return;
+
+    // Save clip and restrict to camera bounds
+    g.saveState();
+    g.reduceClipRegion (cameraRect);
+
+    int ox = cameraRect.getX();
+    int oy = cameraRect.getY();
+
+    // Draw oldest → newest so newer frames paint on top
+    for (int age = kTrailLen - 1; age >= 1; --age)
+    {
+        int idx = (trailHead - 1 - age + kTrailLen * 2) % kTrailLen;
+        auto& f = trailBuf[idx];
+        if (! f.valid) continue;
+
+        // age=1 is freshest ghost, age=kTrailLen-1 is oldest
+        float t     = 1.0f - (float)(age) / (float) kTrailLen;  // 0=old, 1=fresh
+        float alpha = t * t * 0.55f;   // quad ease, max ~0.55 on freshest ghost
+
+        juce::Colour lineCol  = FS_ACCENT.withAlpha (alpha * 0.7f);
+        juce::Colour dotCol   = FS_ACCENT.withAlpha (alpha);
+        float        dotR     = 4.0f + t * 4.0f;   // 4..8 px radius
+
+        // Polyline through the 6 joints
+        juce::Path jp;
+        for (int i = 0; i < 6; ++i)
         {
-            float x = left_x + (float) i / (float)(currentWave.size() - 1) * width;
-            float y = centerY - currentWave[i] * ampPx;
-            if (i == 0) wp.startNewSubPath (x, y);
-            else        wp.lineTo          (x, y);
+            float px = (float)(ox + f.joints[i].x);
+            float py = (float)(oy + f.joints[i].y);
+            if (i == 0) jp.startNewSubPath (px, py);
+            else        jp.lineTo          (px, py);
         }
-        g.setColour (FS_WAVE_COL);
-        g.strokePath (wp, juce::PathStrokeType (3.0f));
+        g.setColour (lineCol);
+        g.strokePath (jp, juce::PathStrokeType (1.0f + t * 1.5f));
+
+        // Joint dots
+        g.setColour (dotCol);
+        for (int i = 0; i < 6; ++i)
+        {
+            float px = (float)(ox + f.joints[i].x);
+            float py = (float)(oy + f.joints[i].y);
+            g.fillEllipse (px - dotR, py - dotR, dotR * 2.0f, dotR * 2.0f);
+        }
+
+        // Ear dots (smaller)
+        float earR = 2.5f + t * 3.0f;
+        for (int i = 0; i < 2; ++i)
+        {
+            float px = (float)(ox + f.ears[i].x);
+            float py = (float)(oy + f.ears[i].y);
+            g.fillEllipse (px - earR, py - earR, earR * 2.0f, earR * 2.0f);
+        }
+    }
+
+    g.restoreState();
+}
+
+// ============================================================
+//  Particle system
+//  Particles live in PIXEL space relative to the full component,
+//  spawning from the wave contour drawn inside cameraRect.
+// ============================================================
+void FleshSynthPage::tickParticles()
+{
+    constexpr float dt    = 1.0f / 40.0f;
+    constexpr float grav  = 0.18f;
+    constexpr float drag  = 0.96f;
+
+    for (auto& p : particles)
+    {
+        p.x    += p.vx * dt;
+        p.y    += p.vy * dt;
+        p.vy   += grav * dt;
+        p.vx   *= drag;
+        p.life -= dt * 0.9f;
+    }
+    particles.erase (std::remove_if (particles.begin(), particles.end(),
+                     [](const Particle& p){ return p.life <= 0.0f; }),
+                     particles.end());
+}
+
+void FleshSynthPage::spawnParticlesFromWave()
+{
+    // Use the top half of the existing sidebarRect as the scope area
+    auto scope = sidebarRect.withHeight (sidebarRect.getHeight() / 2);
+
+    if (currentWave.empty() || scope.isEmpty()) return;
+
+    // Calculate RMS for intensity
+    float rms = 0.0f;
+    for (float s : currentWave) rms += s * s;
+    rms = std::sqrt (rms / (float) currentWave.size());
+    if (rms < 0.05f) return;
+
+    // Scope geometry constants
+    const float left_x  = (float) scope.getX() + 10.0f;
+    const float right_x = (float) scope.getRight() - 10.0f;
+    const float waveW   = right_x - left_x;
+    const float centerY = (float) scope.getCentreY();
+    const float ampPx   = (float)(scope.getHeight() / 2 - 10);
+
+    float maxA = 1e-6f;
+    for (float s : currentWave) maxA = std::max (maxA, std::abs (s));
+
+    int toSpawn = juce::jlimit (0, 6, (int)(rms * 16.0f));
+
+    for (int i = 0; i < toSpawn; ++i)
+    {
+        int   si   = (int)(rng.nextFloat() * (float)(currentWave.size() - 1));
+        float norm = (float) si / (float)(currentWave.size() - 1); 
+
+        // Position particles directly on the scope's waveform contour
+        float px = left_x  + norm * waveW;
+        float py = centerY - (currentWave[si] / maxA) * ampPx; 
+
+        Particle p;
+        p.x    = px;
+        p.y    = py;
+        p.vx   = (rng.nextFloat() - 0.5f) * 2.0f;
+        p.vy   = -(rng.nextFloat() * 2.0f);
+        p.life = rng.nextFloat() * 0.6f + 0.4f;
+        p.size = rng.nextFloat() * 1.2f + 0.8f; // Made smaller/subtler
+        particles.push_back (p);
     }
 }
 
 // ============================================================
-//  Wave panel — oscilloscope / waveform display
+//  Spectrum update — DFT against wavetable harmonics
+//  The wavetable is 512 samples representing one full cycle, so
+//  harmonic k sits at bin k/N cycles-per-sample — independent of
+//  playback frequency.  Decay alpha raised for snappier response.
 // ============================================================
-void FleshSynthPage::drawWavePanel (juce::Graphics& g, juce::Rectangle<int> bounds)
+void FleshSynthPage::updateSpectrum()
+{
+    if (currentWave.empty()) return;
+
+    const int N = (int) currentWave.size();
+
+    for (int bar = 0; bar < kNumBars; ++bar)
+    {
+        // Project onto harmonic (bar+1) of the wavetable cycle
+        float omega = 2.0f * juce::MathConstants<float>::pi
+                    * (float)(bar + 1) / (float) N;
+
+        float re = 0.0f, im = 0.0f;
+        for (int i = 0; i < N; ++i)
+        {
+            re += currentWave[i] * std::cos (omega * (float) i);
+            im += currentWave[i] * std::sin (omega * (float) i);
+        }
+
+        float mag    = std::sqrt (re * re + im * im) / (float) N * 2.0f;
+        float target = juce::jlimit (0.0f, 1.0f, mag * 2.5f);
+
+        // Fast attack, faster decay (was 0.12 — now 0.28 for visible response)
+        float alpha  = (target > spectrumBars[bar]) ? 0.55f : 0.28f;
+        spectrumBars[bar] = (1.0f - alpha) * spectrumBars[bar] + alpha * target;
+    }
+}
+
+// ============================================================
+//  Spectrum panel — harmonic bars + particles
+//  Particles are now in pixel space (spawned from cameraRect wave),
+//  so we draw them directly without normalised→pixel conversion.
+// ============================================================
+void FleshSynthPage::drawSpectrumPanel (juce::Graphics& g, juce::Rectangle<int> bounds)
 {
     g.setColour (juce::Colour (0xff000000));
     g.fillRect  (bounds);
 
-    g.setColour (juce::Colour (0x22ff3333));
-    for (int x = bounds.getX(); x < bounds.getRight();  x += 40) g.drawVerticalLine  (x, (float) bounds.getY(), (float) bounds.getBottom());
-    for (int y = bounds.getY(); y < bounds.getBottom(); y += 40) g.drawHorizontalLine (y, (float) bounds.getX(), (float) bounds.getRight());
+    g.setColour (juce::Colour (0x18ff3333));
+    for (int x = bounds.getX(); x < bounds.getRight();  x += 40) g.drawVerticalLine  (x, (float)bounds.getY(), (float)bounds.getBottom());
+    for (int y = bounds.getY(); y < bounds.getBottom(); y += 40) g.drawHorizontalLine (y, (float)bounds.getX(), (float)bounds.getRight());
 
     g.setColour (FS_BORDER_DIM);
     g.drawRect  (bounds.toFloat(), 1.0f);
 
     g.setColour (FS_ACCENT);
     g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
-    g.drawText  ("WAVEFORM", bounds.getX() + 6, bounds.getY() + 4, 80, 12, juce::Justification::centredLeft);
+    g.drawText  ("HARMONICS", bounds.getX() + 6, bounds.getY() + 4, 80, 12, juce::Justification::centredLeft);
 
-    if (currentWave.empty()) return;
-
-    float cx  = (float) bounds.getX();
-    float cy  = (float) bounds.getCentreY();
-    float amp = (float) bounds.getHeight() * 0.42f;
-    float ww  = (float) bounds.getWidth();
-
-    juce::Path p;
-    for (int i = 0; i < (int) currentWave.size(); ++i)
+    // Note name
+    auto freqToNote = [](float f) -> juce::String
     {
-        float x = cx + (float) i / (float)(currentWave.size() - 1) * ww;
-        float y = cy - currentWave[i] * amp;
-        if (i == 0) p.startNewSubPath (x, y);
-        else        p.lineTo (x, y);
+        static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+        int midi = (int) std::round (69.0f + 12.0f * std::log2 (f / 440.0f));
+        if (midi < 0 || midi > 127) return "---";
+        return juce::String (names[midi % 12]) + juce::String (midi / 12 - 1);
+    };
+
+    g.setColour (FS_TEXT_DIM);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  (juce::String (oscFreq, 1) + " Hz  " + freqToNote (oscFreq),
+                 bounds.getRight() - 110, bounds.getY() + 4, 104, 12,
+                 juce::Justification::centredRight);
+
+    // Bars
+    const int   margin = 10;
+    const float barW   = (float)(bounds.getWidth() - margin * 2) / (float) kNumBars;
+    const float maxH   = (float)(bounds.getHeight() - 20);
+    const float baseY  = (float)(bounds.getBottom() - 4);
+
+    for (int i = 0; i < kNumBars; ++i)
+    {
+        float h   = juce::jmax (1.0f, spectrumBars[i] * maxH);
+        float bx  = (float)(bounds.getX() + margin) + (float)i * barW + barW * 0.1f;
+        float bw  = barW * 0.78f;
+        float norm = spectrumBars[i];
+
+        // Bar body
+        g.setColour (FS_ACCENT.withAlpha (0.18f + norm * 0.65f));
+        g.fillRect  (bx, baseY - h, bw, h);
+
+        // Bright cap
+        g.setColour (FS_ACCENT.withAlpha (0.55f + norm * 0.45f));
+        g.fillRect  (bx, baseY - h, bw, 2.0f);
+    }
+}
+
+// ============================================================
+//  Particles drawn in the overlay (above camera view) so they
+//  appear to rise off the wave that's drawn over the camera feed.
+//  Called from overlayView's onPaint lambda — coordinates are
+//  already in full-component pixel space.
+// ============================================================
+void FleshSynthPage::drawParticles (juce::Graphics& g)
+{
+    g.saveState();
+    
+    // Ensure particles only draw inside the top-right scope
+    auto scope = sidebarRect.withHeight (sidebarRect.getHeight() / 2);
+    g.reduceClipRegion (scope);
+
+    for (auto& p : particles)
+    {
+        float alpha = juce::jlimit (0.0f, 1.0f, p.life);
+
+        // Subtler "Flesh" accent color for the particles
+        g.setColour (FS_ACCENT.withAlpha (alpha * 0.4f));
+        g.fillEllipse (p.x - p.size, p.y - p.size, p.size * 2.0f, p.size * 2.0f);
+
+        // Very faint outer glow
+        g.setColour (juce::Colours::white.withAlpha (alpha * 0.1f));
+        g.fillEllipse (p.x - p.size * 1.5f, p.y - p.size * 1.5f, p.size * 3.0f, p.size * 3.0f);
     }
 
-    // Glow pass
-    g.setColour (FS_WAVE_COL.withAlpha (0.2f));
-    g.strokePath (p, juce::PathStrokeType (5.0f));
-    // Main line
-    g.setColour (FS_WAVE_COL);
-    g.strokePath (p, juce::PathStrokeType (2.0f));
+    g.restoreState();
 }
 
 // ============================================================
@@ -564,8 +799,10 @@ void FleshSynthPage::drawSidebar (juce::Graphics& g, juce::Rectangle<int> bounds
             if (i == 0) sp.startNewSubPath (x, y);
             else        sp.lineTo          (x, y);
         }
-        g.setColour (juce::Colour (0xff00ff64));
-        g.strokePath (sp, juce::PathStrokeType (2.0f));
+        g.setColour (FS_ACCENT.withAlpha (0.18f));
+        g.strokePath (sp, juce::PathStrokeType (3.5f));
+        g.setColour (FS_ACCENT);
+        g.strokePath (sp, juce::PathStrokeType (1.5f));
     }
 
     // ---- Sliders (bottom half) ----
@@ -579,32 +816,61 @@ void FleshSynthPage::drawSidebar (juce::Graphics& g, juce::Rectangle<int> bounds
     freqTrackRect = { bounds.getX() + margin, freqY - 15, sw - margin * 2, 30 };
     tiltTrackRect = { bounds.getX() + margin, tiltY - 15, sw - margin * 2, 30 };
 
-    drawSlider (g, "FREQ", freqTrackRect, freqSliderNorm, FS_WAVE_COL, oscFreq, " Hz");
+    drawSlider (g, "FREQ", freqTrackRect, freqSliderNorm, FS_ACCENT, oscFreq, " Hz");
 
     float maxSt = tiltSliderNorm * TILT_MAX_RANGE_ST;
     drawSlider (g, "TILT RANGE", tiltTrackRect, tiltSliderNorm,
-                juce::Colour (0xff00c8ff), maxSt, " st");
+                juce::Colour (0xffff6644), maxSt, " st");
 
-    // Invert toggle
-    int tgX = bounds.getX() + margin;
-    int tgY = tiltY + 22;
-    toggleRect = { tgX, tgY, 130, 34 };
+    // ============================================================
+    //  INVERT TOGGLE — UPDATED (smaller, centered, red, with thumb indicator)
+    // ============================================================
+    int toggleW = 110;
+    int toggleH = 28;
+    int tgX     = bounds.getX() + (sw - toggleW) / 2;   // perfectly centered
+    int tgY     = tiltY + 35;
 
-    g.setColour (tiltInvert ? juce::Colour (0xff008cff) : juce::Colour (0xff00508c));
-    g.fillRect  (toggleRect);
+    toggleRect = { tgX, tgY, toggleW, toggleH };
+
+    bool isOn = tiltInvert;
+
+    // Dark pill track
+    g.setColour (juce::Colour (0xff1a1a1a));
+    g.fillRoundedRectangle (toggleRect.toFloat(), toggleH * 0.5f);
+
     g.setColour (FS_BORDER_DIM);
-    g.drawRect  (toggleRect.toFloat(), 1.0f);
+    g.drawRoundedRectangle (toggleRect.toFloat(), toggleH * 0.5f, 1.5f);
 
-    g.setColour (FS_TEXT_PRI);
-    g.setFont   (juce::Font (juce::FontOptions().withHeight (11.0f)));
-    g.drawText  (tiltInvert ? "INVERT: ON" : "INVERT: OFF",
-                 toggleRect, juce::Justification::centred);
+    // Sliding thumb (red when ON)
+    const float thumbMargin = 4.0f;
+    const float thumbW      = toggleW * 0.46f;
+    const float thumbH      = toggleH - thumbMargin * 2.0f;
+    const float thumbX      = isOn ? (float)(tgX + toggleW - thumbW - thumbMargin)
+                                   : (float)(tgX + thumbMargin);
 
-    // Debug readout
+    juce::Rectangle<float> thumbRect { thumbX, (float)tgY + thumbMargin, thumbW, thumbH };
+
+    g.setColour (isOn ? FS_ACCENT : juce::Colour (0xff444444));
+    g.fillRoundedRectangle (thumbRect, thumbH * 0.5f);
+
+    // Nice highlight on thumb when ON
+    if (isOn)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.22f));
+        g.fillRoundedRectangle (thumbRect.reduced (2.0f), (thumbH - 4.0f) * 0.5f);
+    }
+
+    // Label above toggle
+    g.setColour (FS_TEXT_DIM);
+    g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
+    g.drawText ("INVERT", toggleRect.getX(), toggleRect.getY() - 18,
+                toggleRect.getWidth(), 14, juce::Justification::centred);
+
+    // Debug readout (automatically placed below new toggle)
     g.setColour (FS_TEXT_DIM);
     g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
     g.drawText  (juce::String::formatted ("pf: %.3f  osc: %.1f Hz", pitchFactor, oscFreq),
-                 bounds.getX() + margin, tgY + 40, sw - margin * 2, 14,
+                 bounds.getX() + margin, toggleRect.getBottom() + 8, sw - margin * 2, 14,
                  juce::Justification::centredLeft);
 }
 
@@ -657,7 +923,11 @@ void FleshSynthPage::resized()
     wavePanelRect = { camX,        camY + camH, camW, waveH };
     sidebarRect   = { camX + camW, camY,        sideW, h - headerH - statusH };
 
-    cameraView.setBounds (cameraRect);
+    cameraView.setBounds  (cameraRect);
+
+    // overlayView covers the full component so trail/overlay/particle
+    // coordinates stay in the same space as cameraRect
+    overlayView.setBounds (getLocalBounds());
 }
 
 // ============================================================

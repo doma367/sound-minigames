@@ -5,6 +5,7 @@ class LandingPage;
 class SettingsPage;
 class HelpOverlay;
 class FleshSynthPage;
+class DualcastPage;
 
 //==============================================================================
 class MainComponent : public juce::Component
@@ -22,15 +23,17 @@ public:
     void hideSettings();
     void showHelp();
     void hideHelp();
-    void launchMode (int cardIndex);   // 0 = FleshSynth, 1 = Pulsefield, 2 = Dualcast
+    void launchMode (int cardIndex);   // 0=FleshSynth  1=Pulsefield(stub)  2=Dualcast
+    void launchVisionProcess();
 
 private:
     std::unique_ptr<LandingPage>    landingPage;
     std::unique_ptr<SettingsPage>   settingsPage;
     std::unique_ptr<HelpOverlay>    helpOverlay;
     std::unique_ptr<FleshSynthPage> fleshSynthPage;
+    std::unique_ptr<DualcastPage>   dualcastPage;
 
     juce::ChildProcess visionProcess;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

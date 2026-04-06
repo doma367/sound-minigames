@@ -16,6 +16,9 @@
       <FILE id="GjMqsq" name="MainComponent.cpp" compile="1" resource="0"
             file="Source/MainComponent.cpp"/>
     </GROUP>
+    <FILE id="Gv5S8G" name="Dualcastpage.cpp" compile="1" resource="0"
+          file="Source/Dualcastpage.cpp"/>
+    <FILE id="tgAExS" name="Dualcastpage.h" compile="0" resource="0" file="Source/Dualcastpage.h"/>
     <FILE id="hu6Vce" name="Fleshsynthpage.cpp" compile="1" resource="0"
           file="Source/Fleshsynthpage.cpp"/>
     <FILE id="zDm1PO" name="Fleshsynthpage.h" compile="0" resource="0"
