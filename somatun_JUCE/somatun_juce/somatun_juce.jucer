@@ -27,6 +27,10 @@
     <FILE id="ydxo7D" name="HelpOverlay.h" compile="0" resource="0" file="Source/HelpOverlay.h"/>
     <FILE id="UnQVdd" name="LandingPage.cpp" compile="1" resource="0" file="Source/LandingPage.cpp"/>
     <FILE id="ZnBIaM" name="LandingPage.h" compile="0" resource="0" file="Source/LandingPage.h"/>
+    <FILE id="J5im4m" name="Pulsefieldpage.cpp" compile="1" resource="0"
+          file="Source/Pulsefieldpage.cpp"/>
+    <FILE id="xKGta5" name="Pulsefieldpage.h" compile="0" resource="0"
+          file="Source/Pulsefieldpage.h"/>
     <FILE id="JchB0B" name="SettingsPage.cpp" compile="1" resource="0"
           file="Source/SettingsPage.cpp"/>
     <FILE id="bzZiht" name="SettingsPage.h" compile="0" resource="0" file="Source/SettingsPage.h"/>
@@ -38,6 +42,7 @@
   <MODULES>
     <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_audio_devices" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_audio_formats" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_core" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_data_structures" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_events" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
@@ -66,6 +71,7 @@
         <MODULEPATH id="juce_video" path="../../../JUCE/modules"/>
         <MODULEPATH id="juce_gui_extra" path="../../../JUCE/modules"/>
         <MODULEPATH id="juce_osc" path="../../../JUCE/modules"/>
+        <MODULEPATH id="juce_audio_formats" path="../../../JUCE/modules"/>
       </MODULEPATHS>
     </XCODE_MAC>
   </EXPORTFORMATS>

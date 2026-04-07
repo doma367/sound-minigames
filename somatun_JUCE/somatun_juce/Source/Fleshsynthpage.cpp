@@ -60,17 +60,6 @@ FleshSynthPage::FleshSynthPage (MainComponent& mc)
 
     audio.playBuf.assign (512, 0.0f);
     audio.snapBuf.assign (512, 0.0f);
-
-    // ---- OSC receiver: listen on port 9000 ----
-    if (osc.connect (9000))
-    {
-        osc.addListener (this);
-        DBG ("OSC receiver connected on port 9000");
-    }
-    else
-    {
-        DBG ("[ERROR] could not bind OSC port 9000");
-    }
 }
 
 FleshSynthPage::~FleshSynthPage()
@@ -84,40 +73,43 @@ FleshSynthPage::~FleshSynthPage()
 // ============================================================
 void FleshSynthPage::start()
 {
-    // --- Video receiver (TCP frames from Python) ---
     videoReceiver.startReceiver();
- 
-    // --- Audio ---
     deviceManager.initialiseWithDefaultDevices (0, 2);
     deviceManager.addAudioCallback (this);
- 
     startTimerHz (40);
+
+    // Register pose callback with the shared OSC router
+    mainComponent.setPoseCallback ([this](const juce::OSCMessage& m)
+    {
+        handlePoseMessage (m);
+    });
+
+    DBG ("[FleshSynth] started, /pose callback registered");
 }
 
 void FleshSynthPage::stop()
 {
+    // Unregister first so no callbacks arrive during shutdown
+    mainComponent.clearOSCCallbacks();
+
     stopTimer();
- 
     videoReceiver.stopReceiver();
- 
     deviceManager.removeAudioCallback (this);
     deviceManager.closeAudioDevice();
+
+    DBG ("[FleshSynth] stopped");
 }
 
 // ============================================================
 //  OSC callback — receives /pose message from Python
 // ============================================================
-void FleshSynthPage::oscMessageReceived (const juce::OSCMessage& m)
+void FleshSynthPage::handlePoseMessage (const juce::OSCMessage& m)
 {
-    if (m.getAddressPattern().toString() != "/pose")
-        return;
-
+    // Called on the message thread by MainComponent's OSC router
     const int n = juce::jmin (m.size(), kNumFloats);
     for (int i = 0; i < n; ++i)
-    {
         if (m[i].isFloat32())
             oscLandmarks[i].store (m[i].getFloat32(), std::memory_order_relaxed);
-    }
 }
 
 // ============================================================

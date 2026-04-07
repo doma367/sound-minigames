@@ -1,4 +1,4 @@
-#include "DualcastPage.h"
+#include "Dualcastpage.h"
 #include "MainComponent.h"
 
 // ██████████████████████████████████████████████████████████
@@ -144,9 +144,6 @@ DualcastPage::DualcastPage (MainComponent& mc) : mainComponent (mc)
 
     backButton.onClick = [this] { stop(); mainComponent.showLanding(); };
     addAndMakeVisible (backButton);
-
-    if (osc.connect (9000))
-        osc.addListener (this);
 }
 
 DualcastPage::~DualcastPage()
@@ -164,38 +161,51 @@ void DualcastPage::start()
     deviceManager.initialiseWithDefaultDevices (0, 2);
     deviceManager.addAudioCallback (&audioEngine);
     startTimerHz (40);
+
+    // Register both pose and hands callbacks
+    mainComponent.setPoseCallback ([this](const juce::OSCMessage& m)
+    {
+        handlePoseMessage (m);
+    });
+    mainComponent.setHandsCallback ([this](const juce::OSCMessage& m)
+    {
+        handleHandsMessage (m);
+    });
+
+    DBG ("[Dualcast] started, /pose + /hands callbacks registered");
 }
 
 void DualcastPage::stop()
 {
+    mainComponent.clearOSCCallbacks();
+
     stopTimer();
     videoReceiver.stopReceiver();
     deviceManager.removeAudioCallback (&audioEngine);
     deviceManager.closeAudioDevice();
     audioEngine.setDroneOn (false);
     audioEngine.setLeadOn  (false);
+
+    DBG ("[Dualcast] stopped");
 }
 
 // ============================================================
 //  OSC receive
 // ============================================================
-void DualcastPage::oscMessageReceived (const juce::OSCMessage& m)
+void DualcastPage::handlePoseMessage (const juce::OSCMessage& m)
 {
-    const auto addr = m.getAddressPattern().toString();
-    if (addr == "/pose")
-    {
-        int n = juce::jmin (m.size(), kNumLmF);
-        for (int i = 0; i < n; ++i)
-            if (m[i].isFloat32())
-                oscPose[i].store (m[i].getFloat32(), std::memory_order_relaxed);
-    }
-    else if (addr == "/hands")
-    {
-        int n = juce::jmin (m.size(), kHandFloats);
-        for (int i = 0; i < n; ++i)
-            if (m[i].isFloat32())
-                oscHands[i].store (m[i].getFloat32(), std::memory_order_relaxed);
-    }
+    int n = juce::jmin (m.size(), kNumLmF);
+    for (int i = 0; i < n; ++i)
+        if (m[i].isFloat32())
+            oscPose[i].store (m[i].getFloat32(), std::memory_order_relaxed);
+}
+
+void DualcastPage::handleHandsMessage (const juce::OSCMessage& m)
+{
+    int n = juce::jmin (m.size(), kHandFloats);
+    for (int i = 0; i < n; ++i)
+        if (m[i].isFloat32())
+            oscHands[i].store (m[i].getFloat32(), std::memory_order_relaxed);
 }
 
 // ============================================================

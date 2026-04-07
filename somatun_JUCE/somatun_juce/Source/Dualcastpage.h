@@ -266,8 +266,7 @@ private:
 //  DualcastPage
 // ============================================================
 class DualcastPage : public juce::Component,
-                     private juce::Timer,
-                     private juce::OSCReceiver::Listener<juce::OSCReceiver::MessageLoopCallback>
+                     private juce::Timer
 {
 public:
     explicit DualcastPage (MainComponent& mc);
@@ -280,9 +279,8 @@ public:
     void paint   (juce::Graphics&) override;
     void resized () override;
     void mouseDown (const juce::MouseEvent&) override;
-
-    // OSC callbacks
-    void oscMessageReceived (const juce::OSCMessage& m) override;
+    void handlePoseMessage  (const juce::OSCMessage& m);
+    void handleHandsMessage (const juce::OSCMessage& m);
 
 private:
     // ---- 40 Hz UI tick ----
@@ -323,9 +321,6 @@ private:
     // ---- Camera / video ----
     CameraView    cameraView;
     VideoReceiver videoReceiver { cameraView };
-
-    // ---- OSC ----
-    juce::OSCReceiver osc;
 
     // Raw pose landmarks from /pose  (33 × 2)
     static constexpr int kNumLm   = 33;
