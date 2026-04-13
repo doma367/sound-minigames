@@ -8,7 +8,7 @@ class SettingsPage;
 class HelpOverlay;
 class FleshSynthPage;
 class DualcastPage;
-class PulsefieldPage;
+class PulseFieldPage;
 
 //==============================================================================
 class MainComponent : public juce::Component,
@@ -43,7 +43,7 @@ private:
     std::unique_ptr<HelpOverlay>    helpOverlay;
     std::unique_ptr<FleshSynthPage> fleshSynthPage;
     std::unique_ptr<DualcastPage>   dualcastPage;
-    std::unique_ptr<PulsefieldPage> pulsefieldPage;
+    std::unique_ptr<PulseFieldPage> pulsefieldPage;
 
     juce::ChildProcess  visionProcess;
 

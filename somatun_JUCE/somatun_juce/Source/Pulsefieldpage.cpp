@@ -1,257 +1,316 @@
 #include "Pulsefieldpage.h"
 #include "MainComponent.h"
 
-const juce::Colour PulsefieldPage::kColBg       { 0xff0b0b11 };
-const juce::Colour PulsefieldPage::kColPanel    { 0xff111119 };
-const juce::Colour PulsefieldPage::kColActive   { 0xff00dc69 };
-const juce::Colour PulsefieldPage::kColInactive { 0xff242432 };
-const juce::Colour PulsefieldPage::kColFilter   { 0xff00d7ff };
-const juce::Colour PulsefieldPage::kColTime     { 0xffffaa00 };
-const juce::Colour PulsefieldPage::kColTimeLock { 0xffffff00 };
-const juce::Colour PulsefieldPage::kColFeedback { 0xffff3232 };
-const juce::Colour PulsefieldPage::kColReverb   { 0xff9155ff };
-const juce::Colour PulsefieldPage::kColWaveform { 0xff00c8ff };
-const juce::Colour PulsefieldPage::kColVol      { 0xffff961e };
-const juce::Colour PulsefieldPage::kColAdd      { 0xff167d34 };
-const juce::Colour PulsefieldPage::kColDel      { 0xffa01c1c };
-const juce::Colour PulsefieldPage::kColBorder   { 0xff262637 };
-const juce::Colour PulsefieldPage::kColLabel    { 0xff64647a };
-const juce::Colour PulsefieldPage::kColToolbar  { 0xff0e0e14 };
+#include <numeric>
+#include <algorithm>
 
-const int PulsefieldPage::kHandConns[kNumHandConns][2] = {
-    {0,1},{1,2},{2,3},{3,4}, {0,5},{5,6},{6,7},{7,8}, {0,9},{9,10},{10,11},{11,12},
-    {0,13},{13,14},{14,15},{15,16}, {0,17},{17,18},{18,19},{19,20}, {5,9},{9,13},{13,17}
-};
+// ============================================================
+//  Colour palette  (SomatunLookAndFeel / red-on-dark theme)
+// ============================================================
+static const juce::Colour PF_BG_DARK     { 0xff030303 };
+static const juce::Colour PF_BG_CARD     { 0xff0a0608 };
+static const juce::Colour PF_BG_ROW_A    { 0xff110a0a };
+static const juce::Colour PF_BG_ROW_B    { 0xff0c0707 };
+static const juce::Colour PF_ACCENT      { 0xffff2222 };  // hot blood red
+static const juce::Colour PF_ACCENT_DIM  { 0x44ff2222 };
+static const juce::Colour PF_BORDER_DIM  { 0x2aff2222 };
+static const juce::Colour PF_BORDER_HOT  { 0x99ff2222 };
+static const juce::Colour PF_TEXT_PRI    { 0xffd8c8c8 };  // warm off-white, slightly red-tinted
+static const juce::Colour PF_TEXT_DIM    { 0x55d8c8c8 };
+static const juce::Colour PF_TEXT_ACC    { 0xffff4444 };
 
-PulsefieldPage::PulsefieldPage (MainComponent& mc) : mainComponent (mc)
+// Gesture-mapped colours — all in the red/crimson/burgundy/violet family
+static const juce::Colour PF_COL_FILTER  { 0xffcc2244 };  // deep crimson / right hand filter
+static const juce::Colour PF_COL_TIME    { 0xffaa1133 };  // darker blood red / delay time
+static const juce::Colour PF_COL_FB      { 0xffff2222 };  // hot red / delay feedback
+static const juce::Colour PF_COL_VOL     { 0xff882233 };  // muted burgundy / per-row volume
+static const juce::Colour PF_COL_REVERB  { 0xff661133 };  // very dark wine / reverb
+static const juce::Colour PF_COL_ACTIVE  { 0xffff2222 };  // active step — hot red
+static const juce::Colour PF_COL_INACT   { 0xff1e0f0f };  // inactive step — near-black red tint
+static const juce::Colour PF_COL_WAVE    { 0xffcc1122 };  // waveform — deep red
+static const juce::Colour PF_COL_VEC     { 0xff991122 };  // vectorscope — darker red
+
+// ============================================================
+//  PFCameraView
+// ============================================================
+void PFCameraView::pushFrame (const juce::Image& img)
 {
-    setLookAndFeel (&laf);
-    delayBuf.assign (kDelaySamples, 0.0f);
-
-    addVoice ("Kick",   synthesiseKick  (44100.0), true);
-    addVoice ("Snare",  synthesiseSnare (44100.0), true);
-    addVoice ("Hi-hat", synthesiseHat   (44100.0), true);
-
-    grid[0][0] = grid[0][4] = true;
-    grid[1][2] = grid[1][6] = true;
-    stepFlashes.assign (PF_MAX_STEPS, 0.0f);
-
-    backButton.onClick = [this] { mainComponent.showLanding(); };
-    addAndMakeVisible (backButton);
-    addAndMakeVisible (cameraView);
+    { const juce::ScopedLock sl (lock); latest = img; hasFrame = true; }
+    repaint();
 }
 
-PulsefieldPage::~PulsefieldPage()
+void PFCameraView::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black);
+    {
+        const juce::ScopedLock sl (lock);
+        if (latest.isValid())
+            g.drawImage (latest, getLocalBounds().toFloat(),
+                         juce::RectanglePlacement::centred | juce::RectanglePlacement::fillDestination);
+    }
+    if (! hasFrame)
+    {
+        g.setColour (juce::Colour (0x0aff3333));
+        for (int y = 0; y < getHeight(); y += 16)
+            g.drawHorizontalLine (y, 0.0f, (float)getWidth());
+        g.setColour (juce::Colour (0x66ff3333));
+        g.setFont (juce::Font (juce::FontOptions().withHeight (11.0f)));
+        g.drawText ("// CAMERA FEED LOADING...", 12, getHeight() - 24,
+                    getWidth() - 24, 18, juce::Justification::centredLeft);
+    }
+}
+
+// ============================================================
+//  PFVideoReceiver
+// ============================================================
+PFVideoReceiver::PFVideoReceiver (PFCameraView& view)
+    : juce::Thread ("PFVideoReceiver"), cameraView (view) {}
+
+void PFVideoReceiver::startReceiver() { startThread(); }
+
+void PFVideoReceiver::stopReceiver()
+{
+    signalThreadShouldExit();
+    if (auto* s = streamSocket.load()) s->close();
+    stopThread (2000);
+}
+
+bool PFVideoReceiver::readExact (juce::StreamingSocket& sock, void* buf, int numBytes)
+{
+    auto* p = static_cast<char*>(buf);
+    int remaining = numBytes;
+    while (remaining > 0)
+    {
+        int got = sock.read (p, remaining, true);
+        if (got <= 0) return false;
+        p += got; remaining -= got;
+    }
+    return true;
+}
+
+void PFVideoReceiver::run()
+{
+    constexpr int kPort          = 9001;
+    constexpr int kRetryMs       = 1000;
+    constexpr int kMaxFrameBytes = 4 * 1024 * 1024;
+
+    while (! threadShouldExit())
+    {
+        auto sock = std::make_unique<juce::StreamingSocket>();
+        streamSocket = sock.get();
+
+        if (! sock->connect ("127.0.0.1", kPort, 2000))
+        {
+            streamSocket = nullptr;
+            wait (kRetryMs);
+            continue;
+        }
+
+        while (! threadShouldExit())
+        {
+            uint8_t hdr[4];
+            if (! readExact (*sock, hdr, 4)) break;
+
+            uint32_t len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16)
+                         | ((uint32_t)hdr[2] <<  8) |  (uint32_t)hdr[3];
+
+            if (len == 0 || len > (uint32_t)kMaxFrameBytes) break;
+
+            juce::MemoryBlock mb (len);
+            if (! readExact (*sock, mb.getData(), (int)len)) break;
+
+            juce::MemoryInputStream mis (mb, false);
+            juce::JPEGImageFormat   fmt;
+            juce::Image img = fmt.decodeImage (mis);
+
+            if (img.isValid())
+                juce::MessageManager::callAsync ([this, img]() { cameraView.pushFrame (img); });
+        }
+
+        streamSocket = nullptr;
+        wait (kRetryMs);
+    }
+}
+
+// ============================================================
+//  PulseFieldPage — constructor / destructor
+// ============================================================
+PulseFieldPage::PulseFieldPage (MainComponent& mc)
+    : mainComponent (mc)
+{
+    setLookAndFeel (&laf);
+
+    // Default grid pattern (kick / snare / hat)
+    std::memset (grid, 0, sizeof (grid));
+    grid[0][0] = grid[0][4] = true;
+    grid[1][2] = grid[1][6] = true;
+
+    formatManager.registerBasicFormats();
+
+    // Reverb slider defaults
+    sliderSize.minV  = 0.5f; sliderSize.maxV = 3.0f; sliderSize.value = 1.0f;
+    sliderWet .minV  = 0.0f; sliderWet .maxV = 1.0f; sliderWet .value = 0.0f;
+
+    // Boot with 3 built-in voices (Kick / Snare / Hat)
+    {
+        const juce::ScopedLock sl (voiceLock);
+        Voice kick;  kick.name  = "Kick";  kick.samples  = synthKick().getArrayOfReadPointers()[0] ? std::vector<float>() : std::vector<float>();
+        Voice snare; snare.name = "Snare"; snare.samples = std::vector<float>();
+        Voice hat;   hat.name   = "Hat";   hat.samples   = std::vector<float>();
+
+        // Build samples inline
+        auto buildKick = [&]() {
+            const int N = int(44100 * 0.1);
+            kick.samples.resize (N);
+            for (int i = 0; i < N; ++i)
+            {
+                float t = (float)i / 44100.0f;
+                kick.samples[i] = std::sin (2.0f * juce::MathConstants<float>::pi
+                                            * 150.0f * std::pow (0.5f, t / 0.03f) * t)
+                                 * std::exp (-t * 40.0f);
+            }
+        };
+        auto buildSnare = [&]() {
+            const int N = int(44100 * 0.1);
+            snare.samples.resize (N);
+            juce::Random rng;
+            for (int i = 0; i < N; ++i)
+            {
+                float t = (float)i / 44100.0f;
+                snare.samples[i] = (rng.nextFloat() * 0.4f - 0.2f)
+                                  * std::exp (-t * 60.0f);
+            }
+        };
+        auto buildHat = [&]() {
+            const int N = int(44100 * 0.03);
+            hat.samples.resize (N);
+            juce::Random rng;
+            for (int i = 0; i < N; ++i)
+            {
+                float t = (float)i / 44100.0f;
+                hat.samples[i] = (rng.nextFloat() * 0.2f - 0.1f)
+                                * std::exp (-t * 120.0f);
+            }
+        };
+
+        buildKick(); buildSnare(); buildHat();
+        voices.push_back (std::move (kick));
+        voices.push_back (std::move (snare));
+        voices.push_back (std::move (hat));
+    }
+
+    // Init volume sliders
+    for (int i = 0; i < MAX_ROWS; ++i)
+        volSliders[i].value = 0.8f;
+
+    waveformSnap.assign (AudioEngine::WAVE_BUF, 0.0f);
+    vecSnapL.assign (AudioEngine::VEC_BUF, 0.0f);
+    vecSnapR.assign (AudioEngine::VEC_BUF, 0.0f);
+
+    // Camera + overlay setup
+    videoReceiver = std::make_unique<PFVideoReceiver> (cameraView);
+    addAndMakeVisible (cameraView);
+    addAndMakeVisible (overlayView);
+    overlayView.setInterceptsMouseClicks (false, false);
+    overlayView.onPaint = [this](juce::Graphics& g)
+    {
+        drawHandSkeleton (g);
+        drawCamOverlays  (g);
+    };
+
+    backButton.onClick = [this]
+    {
+        stop();
+        mainComponent.showLanding();
+    };
+    addAndMakeVisible (backButton);
+}
+
+PulseFieldPage::~PulseFieldPage()
 {
     stop();
     setLookAndFeel (nullptr);
 }
 
-void PulsefieldPage::start()
+// ============================================================
+//  start / stop
+// ============================================================
+void PulseFieldPage::start()
 {
+    videoReceiver = std::make_unique<PFVideoReceiver> (cameraView);
+    videoReceiver->startReceiver();
     deviceManager.initialiseWithDefaultDevices (0, 2);
     deviceManager.addAudioCallback (this);
-    videoReceiver.startReceiver();
     startTimerHz (40);
 
-    // Register hands callback with shared OSC router
+    // Register /hands OSC callback with the shared router
     mainComponent.setHandsCallback ([this](const juce::OSCMessage& m)
     {
-        decodeHandsOSC (m);
+        handleHandsMessage (m);
     });
 
-    DBG ("[Pulsefield] started, /hands callback registered");
+    DBG ("[PulseField] started");
 }
 
-void PulsefieldPage::stop()
+void PulseFieldPage::stop()
 {
     mainComponent.clearOSCCallbacks();
 
     stopTimer();
-    videoReceiver.stopReceiver();
+    videoReceiver->stopReceiver();
     deviceManager.removeAudioCallback (this);
     deviceManager.closeAudioDevice();
 
-    DBG ("[Pulsefield] stopped");
+    DBG ("[PulseField] stopped");
 }
 
 // ============================================================
-//  Drum synthesis  (CPU-side, called once at startup)
+//  OSC — /hands  (called on the message thread)
 // ============================================================
-std::vector<float> PulsefieldPage::synthesiseKick (double sr) const
+void PulseFieldPage::handleHandsMessage (const juce::OSCMessage& m)
 {
-    int len = (int)(sr * 0.1);
-    std::vector<float> buf (len);
-    juce::Random rng;
-    for (int i = 0; i < len; ++i)
-    {
-        double t   = (double) i / sr;
-        double env = std::exp (-t * 40.0);
-        double osc = std::sin (2.0 * juce::MathConstants<double>::pi * 150.0
-                                * std::pow (0.5, t / 0.03) * t);
-        buf[i] = (float)(osc * env);
-    }
-    return buf;
-}
-
-std::vector<float> PulsefieldPage::synthesiseSnare (double sr) const
-{
-    int len = (int)(sr * 0.1);
-    std::vector<float> buf (len);
-    juce::Random rng;
-    for (int i = 0; i < len; ++i)
-    {
-        double t   = (double) i / sr;
-        double env = std::exp (-t * 60.0);
-        float  n   = (rng.nextFloat() * 2.0f - 1.0f) * 0.2f;
-        buf[i] = n * (float) env;
-    }
-    return buf;
-}
-
-std::vector<float> PulsefieldPage::synthesiseHat (double sr) const
-{
-    int len = (int)(sr * 0.03);
-    std::vector<float> buf (len);
-    juce::Random rng;
-    for (int i = 0; i < len; ++i)
-    {
-        double t   = (double) i / sr;
-        double env = std::exp (-t * 120.0);
-        float  n   = (rng.nextFloat() * 2.0f - 1.0f) * 0.1f;
-        buf[i] = n * (float) env;
-    }
-    return buf;
+    const int n = juce::jmin (m.size(), (int)MAX_HANDS_FLOATS);
+    for (int i = 0; i < n; ++i)
+        if (m[i].isFloat32())
+            oscHandsData[i].store (m[i].getFloat32(), std::memory_order_relaxed);
 }
 
 // ============================================================
-//  Voice management  (call on message thread)
+//  Gesture extraction — mirrors vision.py HandTracker::process
 // ============================================================
-void PulsefieldPage::addVoice (const juce::String& name, std::vector<float> samples, bool builtIn)
+static bool isPeaceSign (const HandLandmark lm[HandFrame::NUM_LANDMARKS])
 {
-    const juce::ScopedLock sl (voiceLock);
-    DrumVoice v;
-    v.name      = name;
-    v.samples   = std::move (samples);
-    v.isBuiltIn = builtIn;
-    v.volume    = 0.8f;
-    voices.push_back (std::move (v));
-
-    // Grow grid row
-    std::vector<bool> row (PF_MAX_STEPS, false);
-    grid.push_back (std::move (row));
-
-    rowVolumes.push_back (0.8f);
-    volDragging.push_back (false);
-    delBtnRects.add ({});
-    volSliderRects.add ({});
-}
-
-void PulsefieldPage::removeVoice (int row)
-{
-    const juce::ScopedLock sl (voiceLock);
-    if ((int) voices.size() <= 1) return;
-    if (row < 0 || row >= (int) voices.size()) return;
-
-    voices.erase (voices.begin() + row);
-    grid.erase   (grid.begin()   + row);
-    rowVolumes.erase  (rowVolumes.begin()  + row);
-    volDragging.erase (volDragging.begin() + row);
-
-    if (row < delBtnRects.size())   delBtnRects.remove (row);
-    if (row < volSliderRects.size()) volSliderRects.remove (row);
-}
-
-bool PulsefieldPage::loadVoice (const juce::File& file)
-{
-    juce::AudioFormatManager mgr;
-    mgr.registerBasicFormats();
-
-    auto* reader = mgr.createReaderFor (file);
-    if (reader == nullptr) return false;
-
-    juce::AudioBuffer<float> buf (1, (int) reader->lengthInSamples);
-    reader->read (&buf, 0, (int) reader->lengthInSamples, 0, true, true);
-    delete reader;
-
-    std::vector<float> samples (buf.getNumSamples());
-    auto* src = buf.getReadPointer (0);
-    for (int i = 0; i < (int) samples.size(); ++i)
-        samples[i] = src[i];
-
-    juce::String name = file.getFileNameWithoutExtension().substring (0, 16);
-    addVoice (name, std::move (samples), false);
-    return true;
-}
-
-void PulsefieldPage::decodeHandsOSC (const juce::OSCMessage& m)
-{
-    if (m.isEmpty()) return;
-
-    DBG ("[Pulsefield] /hands message size: " + juce::String(m.size()));
-
-    HandsFrame frame;
-    frame.numHands = (int) m[0].getFloat32();
-    frame.numHands = juce::jlimit (0, 2, frame.numHands);
-
-    for (int h = 0; h < frame.numHands; ++h)
-    {
-        int base = 1 + h * 43;   // stride = 1 + 21*2
-        if (m.size() < base + 43) break;
-
-        auto& hand = frame.hands[h];
-        hand.isRight = (m[base].getFloat32() > 0.5f);
-        hand.valid   = true;
-
-        for (int lm = 0; lm < 21; ++lm)
-        {
-            hand.x[lm] = m[base + 1 + lm * 2    ].getFloat32();
-            hand.y[lm] = m[base + 1 + lm * 2 + 1].getFloat32();
-        }
-    }
-
-    const juce::ScopedLock sl (handsLock);
-    latestHands = frame;
-}
-
-// ============================================================
-//  Gesture state update  (called from timerCallback, message thread)
-// ============================================================
-static bool isPeace (const HandLandmarks& lm)
-{
-    bool indexUp    = lm.y[8]  < lm.y[6];
-    bool middleUp   = lm.y[12] < lm.y[10];
-    bool ringDown   = lm.y[16] > lm.y[14];
-    bool pinkyDown  = lm.y[20] > lm.y[18];
-    float thumbDist = std::hypot (lm.x[4] - lm.x[8], lm.y[4] - lm.y[8]);
-    bool notPinch   = thumbDist > 0.06f;
+    bool indexUp   = lm[8].y  < lm[6].y;
+    bool middleUp  = lm[12].y < lm[10].y;
+    bool ringDown  = lm[16].y > lm[14].y;
+    bool pinkyDown = lm[20].y > lm[18].y;
+    float thumbIdx = std::hypot (lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+    bool notPinch  = thumbIdx > 0.06f;
     return indexUp && middleUp && ringDown && pinkyDown && notPinch;
 }
 
-void PulsefieldPage::updateGestureState()
+void PulseFieldPage::updateGesture (const HandFrame& hf)
 {
-    HandsFrame frame;
-    {
-        const juce::ScopedLock sl (handsLock);
-        frame = latestHands;
-    }
+    GestureState& s = gesture;
 
-    for (int h = 0; h < frame.numHands; ++h)
+    for (int hi = 0; hi < hf.numHands; ++hi)
     {
-        const auto& hand = frame.hands[h];
-        if (! hand.valid) continue;
+        const auto& h = hf.hands[hi];
+        if (! h.valid) continue;
 
-        if (hand.isRight)
+        if (h.isRight)
         {
             // Index tip height → filter cutoff
-            float rawY = hand.y[8];
-            handYSmooth += kSmoothK * (rawY - handYSmooth);
+            float rawY = h.lm[8].y;
+            s.rawHandY = rawY;
+            s.handY    = s.handY + SMOOTH_K * (rawY - s.handY);
 
-            // Pinch thumb↔index → bit-crush
-            float pinchDist = std::hypot (hand.x[4] - hand.x[8], hand.y[4] - hand.y[8]);
-            isFist = (pinchDist < 0.04f);
+            // Pinch (thumb ↔ index tip) → bit-crush toggle
+            float pinchDist = std::hypot (h.lm[4].x - h.lm[8].x,
+                                          h.lm[4].y - h.lm[8].y);
+            s.isFist = (pinchDist < 0.04f);
         }
-        else  // Left hand
+        else
         {
             // Peace sign → toggle delay lock
             if (peaceCooldown > 0)
@@ -261,1064 +320,1342 @@ void PulsefieldPage::updateGestureState()
             }
             else
             {
-                if (isPeace (hand))  ++peaceCount;
-                else                  peaceCount = 0;
+                if (isPeaceSign (h.lm)) ++peaceCount;
+                else                    peaceCount = 0;
 
-                if (peaceCount >= kPeaceConfirmFrames)
+                if (peaceCount >= PEACE_CONFIRM_FRAMES)
                 {
-                    delayLocked  = ! delayLocked;
-                    peaceCount   = 0;
-                    peaceCooldown = kPeaceCooldownFrames;
+                    s.delayLocked = ! s.delayLocked;
+                    peaceCount    = 0;
+                    peaceCooldown = PEACE_COOLDOWN_FRAMES;
                 }
             }
 
             // Wrist height → delay feedback
-            float rawFb = juce::jlimit (0.0f, 0.85f, 1.1f - hand.y[0] * 1.3f);
-            delayFeedbackSmooth += kSmoothK * (rawFb - delayFeedbackSmooth);
+            float rawFb = juce::jlimit (0.0f, 0.85f, 1.1f - h.lm[0].y * 1.3f);
+            s.rawDelayFeedback = rawFb;
+            s.delayFeedback    = s.delayFeedback + SMOOTH_K * (rawFb - s.delayFeedback);
 
-            // Hand tilt → delay time (unlocked only)
-            if (! delayLocked)
+            // Hand tilt → delay time (only when unlocked)
+            if (! s.delayLocked)
             {
-                float dy    = std::abs (hand.y[5] - hand.y[17]);
+                float dy    = std::abs (h.lm[5].y - h.lm[17].y);
                 float rawDt = juce::jlimit (0.05f, 0.8f, dy * 4.0f);
-                delayTimeSmooth += kSmoothK * (rawDt - delayTimeSmooth);
+                s.rawDelayTime = rawDt;
+                s.delayTimeVal = s.delayTimeVal + SMOOTH_K * (rawDt - s.delayTimeVal);
             }
         }
-    }
-
-    // If no hands, filter alpha stays at current; push updated FX params
-    float rawY   = handYSmooth;
-    float clamped = juce::jlimit (0.0f, 1.0f, (rawY - 0.2f) / 0.5f);
-    float targetAlpha = juce::jlimit (0.01f, 0.95f,
-                                      std::pow (1.0f - clamped, 2.0f));
-
-    // Update FX param snapshot for audio thread
-    {
-        const juce::ScopedLock sl (fxLock);
-        fxParams.filterAlpha   += 0.05f * (targetAlpha - fxParams.filterAlpha);
-        fxParams.delayTimeSec   = delayTimeSmooth;
-        fxParams.delayFeedback  = delayFeedbackSmooth;
-        fxParams.reverbSize     = reverbSizeVal;
-        fxParams.reverbWet      = reverbWetVal;
-        fxParams.bitCrushOn     = isFist;
-        fxParams.paused         = tapMode;   // sequencer paused during tap modal
     }
 }
 
 // ============================================================
-//  Timer callback  (40 Hz, message thread)
+//  Timer — 40 Hz UI update
 // ============================================================
-void PulsefieldPage::timerCallback()
+void PulseFieldPage::timerCallback()
 {
-    updateGestureState();
+    // ── Parse /hands OSC data ──────────────────────────────────
+    HandFrame hf;
+    float numHandsF = oscHandsData[0].load (std::memory_order_relaxed);
+    hf.numHands = juce::jlimit (0, 2, (int)numHandsF);
 
-    // Decay step flashes
-    for (auto& f : stepFlashes)
-        f *= 0.82f;
+    for (int hi = 0; hi < hf.numHands; ++hi)
+    {
+        auto& h   = hf.hands[hi];
+        int   base = 1 + hi * 43;
+        h.valid   = true;
+        float labelF = oscHandsData[base].load (std::memory_order_relaxed);
+        h.isRight = (labelF > 0.5f);
+        for (int li = 0; li < HandFrame::NUM_LANDMARKS; ++li)
+        {
+            h.lm[li].x = oscHandsData[base + 1 + li * 2    ].load (std::memory_order_relaxed);
+            h.lm[li].y = oscHandsData[base + 1 + li * 2 + 1].load (std::memory_order_relaxed);
+        }
+    }
+
+    // ── Update gesture state ───────────────────────────────────
+    updateGesture (hf);
+
+    // ── Push gesture params to audio atomics ──────────────────
+    eng.atomicHandY      .store (gesture.handY,         std::memory_order_relaxed);
+    eng.atomicDelayTime  .store (gesture.delayTimeVal,  std::memory_order_relaxed);
+    eng.atomicDelayFb    .store (gesture.delayFeedback, std::memory_order_relaxed);
+    eng.atomicReverbSize .store (sliderSize.value,      std::memory_order_relaxed);
+    eng.atomicReverbWet  .store (sliderWet.value,       std::memory_order_relaxed);
+    eng.atomicIsFist     .store (gesture.isFist,        std::memory_order_relaxed);
+    eng.atomicIsPaused   .store (isPaused,              std::memory_order_relaxed);
+    eng.atomicBpm        .store (bpm,                   std::memory_order_relaxed);
+    eng.atomicActiveSteps.store (activeSteps,           std::memory_order_relaxed);
+
+    // Push per-row volumes (under voice lock so audio thread is consistent)
+    {
+        const juce::ScopedLock sl (voiceLock);
+        for (int r = 0; r < numRows; ++r)
+            eng.rowVolumes[r] = volSliders[r].value;
+    }
+
+    // ── Snapshot waveform + vectorscope ring buffers for display ─────────
+    {
+        int ptr = eng.wavePtr.load (std::memory_order_relaxed);
+        std::vector<float> snap (AudioEngine::WAVE_BUF);
+        for (int i = 0; i < AudioEngine::WAVE_BUF; ++i)
+            snap[i] = eng.waveBuf[(ptr + i) % AudioEngine::WAVE_BUF];
+        waveformSnap = std::move (snap);
+    }
+    {
+        int vp = eng.vecPtr.load (std::memory_order_relaxed);
+        const int vbs = AudioEngine::VEC_BUF;
+        std::vector<float> snapL (vbs), snapR (vbs);
+        for (int i = 0; i < vbs; ++i)
+        {
+            snapL[i] = eng.vecBufL[(vp + i) % vbs];
+            snapR[i] = eng.vecBufR[(vp + i) % vbs];
+        }
+        vecSnapL = std::move (snapL);
+        vecSnapR = std::move (snapR);
+    }
+
+    // ── Advance hit envelopes ─────────────────────────────────
+    {
+        const juce::ScopedLock sl (hitEnvLock);
+        hitEnvelopes.erase (
+            std::remove_if (hitEnvelopes.begin(), hitEnvelopes.end(),
+                [this](const HitEnv& e) {
+                    const juce::ScopedLock sl2 (voiceLock);
+                    if (e.voiceIdx >= (int)voices.size()) return true;
+                    return e.pos >= (int)voices[e.voiceIdx].samples.size();
+                }),
+            hitEnvelopes.end());
+        for (auto& e : hitEnvelopes) e.pos += 2048;
+    }
+
+    // ── Step flash decay ──────────────────────────────────────
+    for (int i = 0; i < MAX_STEPS; ++i)
+        stepFlash[i] *= 0.82f;
 
     repaint();
 }
 
 // ============================================================
-//  Audio device callback
+//  Audio device initialised — store sample rate
 // ============================================================
-void PulsefieldPage::audioDeviceAboutToStart (juce::AudioIODevice* d)
+void PulseFieldPage::audioDeviceAboutToStart (juce::AudioIODevice* dev)
 {
-    sampleRate = d->getCurrentSampleRate();
-    outputLatencySamples = (int) d->getOutputLatencyInSamples();
-
-    int bpmLocal = bpm;
-    samplesPerStep = juce::jmax (1, (int)(sampleRate * (60.0 / bpmLocal / 2.0)));
-    nextTrigger    = 0;
-
-    // Rebuild built-in voices at correct sample rate
-    {
-        const juce::ScopedLock sl (voiceLock);
-        if (voices.size() >= 1 && voices[0].isBuiltIn) voices[0].samples = synthesiseKick  (sampleRate);
-        if (voices.size() >= 2 && voices[1].isBuiltIn) voices[1].samples = synthesiseSnare (sampleRate);
-        if (voices.size() >= 3 && voices[2].isBuiltIn) voices[2].samples = synthesiseHat   (sampleRate);
-    }
-
-    // Clear delay + reverb
-    std::fill (delayBuf.begin(), delayBuf.end(), 0.0f);
-    delayPtr = 0;
-    std::fill (combPtrs, combPtrs + 4, 0);
-    std::fill (apPtrs,   apPtrs   + 2, 0);
-    std::fill (&combBufs[0][0], &combBufs[0][0] + 4 * kCombBufSize, 0.0f);
-    std::fill (&apBufs[0][0],   &apBufs[0][0]   + 2 * kAPBufSize,   0.0f);
-    filterState = 0.0f;
+    eng.sampleRate = dev->getCurrentSampleRate();
 }
 
-void PulsefieldPage::audioDeviceIOCallbackWithContext (
+// ============================================================
+//  Audio I/O callback — runs on the dedicated audio thread
+//  Mirrors audio.py  DrumMachine::callback
+// ============================================================
+void PulseFieldPage::audioDeviceIOCallbackWithContext (
     const float* const*, int,
-    float* const* outputChannelData, int numOutputChannels,
-    int numSamples, const juce::AudioIODeviceCallbackContext&)
+    float* const* outData, int numOutChannels,
+    int numSamples,
+    const juce::AudioIODeviceCallbackContext& ctx)
 {
-    // Zero outputs
-    for (int ch = 0; ch < numOutputChannels; ++ch)
-        if (outputChannelData[ch])
-            juce::FloatVectorOperations::clear (outputChannelData[ch], numSamples);
-
-    FXParams fx;
+    // Silence on pause
+    if (eng.atomicIsPaused.load (std::memory_order_relaxed))
     {
-        const juce::ScopedLock sl (fxLock);
-        fx = fxParams;
+        for (int ch = 0; ch < numOutChannels; ++ch)
+            juce::FloatVectorOperations::clear (outData[ch], numSamples);
+        return;
     }
 
-    if (fx.paused) return;
+    const double sr = eng.sampleRate;
+    const int    bpmNow = eng.atomicBpm.load (std::memory_order_relaxed);
 
     // Update timing
+    int newSPS = std::max (1, (int)(sr * 60.0 / bpmNow / 2.0));
+    eng.samplesPerStep = newSPS;
+
+    const int activeStepsNow = eng.atomicActiveSteps.load (std::memory_order_relaxed);
+
+    // Smooth all params (audio thread only)
+    auto smooth = [&](float& cur, float target) {
+        cur += AUDIO_SMOOTH_K * (target - cur);
+    };
+    smooth (eng.smoothReverbSize, eng.atomicReverbSize.load (std::memory_order_relaxed));
+    smooth (eng.smoothReverbWet,  eng.atomicReverbWet .load (std::memory_order_relaxed));
+    smooth (eng.smoothDelayTime,  eng.atomicDelayTime .load (std::memory_order_relaxed));
+    smooth (eng.smoothDelayFb,    eng.atomicDelayFb   .load (std::memory_order_relaxed));
+
+    // Filter cutoff from right-hand height
+    float rawY     = eng.atomicHandY.load (std::memory_order_relaxed);
+    float clampedY = juce::jlimit (0.0f, 1.0f, (rawY - 0.2f) / 0.5f);
+    float targetAlpha = juce::jlimit (0.01f, 0.95f,
+                                      std::pow (1.0f - clampedY, 2.0f));
+    smooth (eng.smoothAlpha, targetAlpha);
+
+    const float alpha         = eng.smoothAlpha;
+    const float delayTimeSec  = eng.smoothDelayTime;
+    const float delayFb       = eng.smoothDelayFb;
+    const float reverbSize    = eng.smoothReverbSize;
+    const float reverbWet     = eng.smoothReverbWet;
+    const bool  isFist        = eng.atomicIsFist.load (std::memory_order_relaxed);
+
+    // ── Sequencer triggers ─────────────────────────────────────
     {
-        int curBpm = bpm;
-        int sps = juce::jmax (1, (int)(sampleRate * (60.0 / curBpm / 2.0)));
-        samplesPerStep = sps;
-    }
+        const juce::ScopedLock sl (voiceLock);
+        const int bufStart = eng.totalSamplesOut;
+        const int bufEnd   = bufStart + numSamples;
+        int trigSample     = bufStart + eng.nextTrigger;
 
-    // Sequencer trigger loop
-    long long bufStart = totalSamples;
-    long long bufEnd   = bufStart + numSamples;
-
-    std::vector<std::pair<int,int>> triggers;   // (step, offset within buffer)
-
-    {
-        long long trigSample = bufStart + nextTrigger;
         while (trigSample < bufEnd)
         {
-            int step   = (int)((trigSample / samplesPerStep) % activeSteps);
-            int offset = (int)(trigSample - bufStart);
-            triggers.push_back ({ step, offset });
-            trigSample += samplesPerStep;
-        }
-        nextTrigger = (int)(trigSample - bufEnd);
-    }
+            int step   = (int(trigSample) / eng.samplesPerStep) % activeStepsNow;
+            int offset = int(trigSample) - bufStart;
 
-    // Gather voice snapshots
-    struct VoiceSnap { const float* data; int len; float vol; };
-    std::vector<VoiceSnap> snap;
-    {
-        const juce::ScopedLock sl (voiceLock);
-        int nv = (int) voices.size();
-        snap.resize (nv);
-        for (int r = 0; r < nv; ++r)
-            snap[r] = { voices[r].samples.data(),
-                        (int) voices[r].samples.size(),
-                        (r < (int) rowVolumes.size()) ? rowVolumes[r] : 1.0f };
-    }
-
-    // Fire triggers
-    {
-        const juce::ScopedLock sl (voiceLock);
-        int nv = (int) snap.size();
-        for (auto& [step, offset] : triggers)
-        {
-            for (int r = 0; r < nv && r < (int) grid.size(); ++r)
+            for (int r = 0; r < numRows && r < (int)voices.size(); ++r)
             {
-                if (step < (int) grid[r].size() && grid[r][step])
+                if (step < MAX_STEPS && grid[r][step])
                 {
-                    ActiveSound s;
-                    s.data     = snap[r].data;
-                    s.length   = snap[r].len;
-                    s.position = 0;
-                    s.volume   = snap[r].vol;
-                    activeSounds.push_back (s);
+                    ActiveSound as;
+                    as.voiceIdx   = r;
+                    as.samplePos  = 0;
+                    as.startOffset= std::max (0, offset);
+                    as.volume     = eng.rowVolumes[r];
+                    activeSounds.push_back (as);
 
-                    // Hit envelope
-                    const juce::ScopedLock el (envLock);
-                    hitEnvelopes.push_back ({ snap[r].data, snap[r].len, 0 });
+                    const juce::ScopedLock sl2 (hitEnvLock);
+                    hitEnvelopes.push_back ({ r, 0 });
                 }
             }
+            trigSample += eng.samplesPerStep;
         }
+        eng.nextTrigger = trigSample - bufEnd;
     }
 
-    // Mix active sounds
+    // ── Mix active sounds ──────────────────────────────────────
     std::vector<float> mix (numSamples, 0.0f);
     {
-        auto it = activeSounds.begin();
-        while (it != activeSounds.end())
+        const juce::ScopedLock sl (voiceLock);
+        std::vector<ActiveSound> stillActive;
+
+        for (auto& snd : activeSounds)
         {
-            int remaining = it->length - it->position;
-            int count     = juce::jmin (numSamples, remaining);
-            for (int i = 0; i < count; ++i)
-                mix[i] += it->data[it->position + i] * it->volume;
-            it->position += count;
-            if (it->position >= it->length)
-                it = activeSounds.erase (it);
-            else
-                ++it;
+            if (snd.voiceIdx >= (int)voices.size()) continue;
+            const auto& data  = voices[snd.voiceIdx].samples;
+            int dst   = std::max (0, snd.startOffset);
+            int count = std::min (numSamples - dst, (int)data.size() - snd.samplePos);
+            if (count > 0)
+            {
+                for (int i = 0; i < count; ++i)
+                    mix[dst + i] += data[snd.samplePos + i] * snd.volume;
+                snd.samplePos += count;
+                snd.startOffset = 0;
+            }
+            if (snd.samplePos < (int)data.size())
+                stillActive.push_back (snd);
         }
+        activeSounds = std::move (stillActive);
     }
 
-    // Advance hit envelopes
-    {
-        const juce::ScopedLock el (envLock);
-        auto it = hitEnvelopes.begin();
-        while (it != hitEnvelopes.end())
-        {
-            it->pos += numSamples;
-            if (it->pos >= it->len) it = hitEnvelopes.erase (it);
-            else                    ++it;
-        }
-    }
+    eng.totalSamplesOut += numSamples;
 
-    // Filter (low-pass, alpha driven by hand height)
-    float fs = filterState;
-    float alpha = fx.filterAlpha;
+    // ── Low-pass filter ───────────────────────────────────────
+    std::vector<float> filtered (numSamples);
+    float fs = eng.filterState;
     for (int i = 0; i < numSamples; ++i)
     {
         fs += alpha * (mix[i] - fs);
-        mix[i] = fs;
+        filtered[i] = fs;
     }
-    filterState = fs;
+    eng.filterState = fs;
 
-    // Bit-crush
-    if (fx.bitCrushOn)
+    // ── Bit-crush ─────────────────────────────────────────────
+    std::vector<float> dry (numSamples);
+    if (isFist)
         for (int i = 0; i < numSamples; ++i)
-            mix[i] = std::round (mix[i] * 5.0f) / 5.0f;
+            dry[i] = std::round (filtered[i] * 5.0f) / 5.0f;
+    else
+        dry = filtered;
 
-    // Delay
-    int delaySamples = (int) juce::jlimit (0.02f, 0.8f, fx.delayTimeSec) * (int) sampleRate;
-    delaySamples     = juce::jlimit (1, kDelaySamples - 1, delaySamples);
-    float fb         = fx.delayFeedback;
+    // ── Delay ─────────────────────────────────────────────────
+    const int delaySamples = juce::jlimit (
+        int(0.02 * sr), int(0.8 * sr),
+        int(delayTimeSec * sr));
 
     std::vector<float> out (numSamples);
+    int   dp  = eng.delayPtr;
+    auto& db  = eng.delayBuf;
+    const int dbs = AudioEngine::DELAY_BUF;
+
+    // delayFb controls both the buffer feedback AND the wet output level.
+    // At fb=0 there is no delay output; at fb=0.85 it is fully present.
+    const float delayWetOut = juce::jlimit (0.0f, 0.95f, delayFb * 1.1f);
+    for (int i = 0; i < numSamples; ++i)
     {
-        int dp  = delayPtr;
-        int dbs = kDelaySamples;
-        for (int i = 0; i < numSamples; ++i)
-        {
-            int   rp  = (dp - delaySamples + dbs) % dbs;
-            float wet = delayBuf[rp];
-            delayBuf[dp] = mix[i] + wet * fb;
-            dp = (dp + 1) % dbs;
-            out[i] = mix[i] + (fb > 0.05f ? wet * 0.3f : 0.0f);
-        }
-        delayPtr = dp;
+        int   rp  = (dp - delaySamples + dbs) % dbs;
+        float wet = db[rp];
+        db[dp]    = dry[i] + wet * delayFb;
+        dp        = (dp + 1) % dbs;
+        out[i]    = dry[i] + wet * delayWetOut;
     }
+    eng.delayPtr = dp;
 
-    // Reverb (Schroeder)
-    if (fx.reverbWet > 0.01f)
+    // ── Schroeder reverb ──────────────────────────────────────
+    if (reverbWet > 0.01f)
     {
-        float combFb = juce::jlimit (0.0f, 0.92f, 0.72f + fx.reverbSize * 0.08f);
+        float combFb = juce::jlimit (0.0f, 0.92f, 0.72f + reverbSize * 0.08f);
+        std::vector<float> revOut (numSamples, 0.0f);
+
+        // Comb filters
+        for (int k = 0; k < 4; ++k)
+        {
+            int  dlen = int(AudioEngine::COMB_BASES[k] * reverbSize);
+            auto* buf = eng.combBufs[k];
+            int  ptr  = eng.combPtrs[k];
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                int r      = (ptr - dlen + AudioEngine::COMB_MAX) % AudioEngine::COMB_MAX;
+                float d    = buf[r];
+                buf[ptr]   = out[i] + d * combFb;
+                revOut[i] += d;
+                ptr        = (ptr + 1) % AudioEngine::COMB_MAX;
+            }
+            eng.combPtrs[k] = ptr;
+        }
+        for (auto& s : revOut) s *= 0.25f;
+
+        // All-pass filters
+        for (int k = 0; k < 2; ++k)
+        {
+            int  dlen = int(AudioEngine::AP_BASES[k] * reverbSize);
+            auto* buf = eng.apBufs[k];
+            int  ptr  = eng.apPtrs[k];
+            std::vector<float> apSig (numSamples);
+            const float apFb = 0.5f;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                int r      = (ptr - dlen + AudioEngine::AP_MAX) % AudioEngine::AP_MAX;
+                float d    = buf[r];
+                float v    = revOut[i] - apFb * d;
+                buf[ptr]   = revOut[i] + apFb * d;
+                apSig[i]   = v;
+                ptr        = (ptr + 1) % AudioEngine::AP_MAX;
+            }
+            eng.apPtrs[k] = ptr;
+            revOut = apSig;
+        }
 
         for (int i = 0; i < numSamples; ++i)
-        {
-            float rev = 0.0f;
-
-            // Comb filters
-            for (int k = 0; k < 4; ++k)
-            {
-                int dlen = (int)(kCombBase[k] * fx.reverbSize);
-                dlen     = juce::jlimit (1, kCombBufSize - 1, dlen);
-                int& ptr = combPtrs[k];
-                int  bsz = kCombBufSize;
-                int  rp  = (ptr - dlen + bsz) % bsz;
-                float d  = combBufs[k][rp];
-                combBufs[k][ptr] = out[i] + d * combFb;
-                ptr = (ptr + 1) % bsz;
-                rev += d;
-            }
-            rev *= 0.25f;
-
-            // Allpass filters
-            for (int k = 0; k < 2; ++k)
-            {
-                int dlen = (int)(kAPBase[k] * fx.reverbSize);
-                dlen     = juce::jlimit (1, kAPBufSize - 1, dlen);
-                int& ptr = apPtrs[k];
-                int  bsz = kAPBufSize;
-                int  rp  = (ptr - dlen + bsz) % bsz;
-                float d  = apBufs[k][rp];
-                float v  = rev - 0.5f * d;
-                apBufs[k][ptr] = rev + 0.5f * d;
-                ptr = (ptr + 1) % bsz;
-                rev = v;
-            }
-
-            float w = fx.reverbWet;
-            out[i] = std::tanh (out[i] * (1.0f - w * 0.5f) + rev * w);
-        }
+            out[i] = std::tanh (out[i] * (1.0f - reverbWet * 0.5f)
+                              + revOut[i] * reverbWet);
     }
     else
     {
+        for (auto& s : out) s = std::tanh (s);
+    }
+
+    // ── Waveform ring buffer ───────────────────────────────────
+    int wp  = eng.wavePtr.load (std::memory_order_relaxed);
+    int wbs = AudioEngine::WAVE_BUF;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        eng.waveBuf[wp] = out[i];
+        wp = (wp + 1) % wbs;
+    }
+    eng.wavePtr.store (wp, std::memory_order_relaxed);
+
+    // ── Vectorscope ring buffer (L = delayed copy, R = current) ───────────
+    // We use a half-buffer delay as "L" so the Lissajous has interesting shape
+    {
+        int vp  = eng.vecPtr.load (std::memory_order_relaxed);
+        const int vbs = AudioEngine::VEC_BUF;
+        const int halfDelay = vbs / 2;
         for (int i = 0; i < numSamples; ++i)
-            out[i] = std::tanh (out[i]);
+        {
+            int rp = (vp - halfDelay + vbs) % vbs;
+            eng.vecBufL[vp] = eng.vecBufR[rp];  // "left" = older sample
+            eng.vecBufR[vp] = out[i];            // "right" = current
+            vp = (vp + 1) % vbs;
+        }
+        eng.vecPtr.store (vp, std::memory_order_relaxed);
     }
 
-    // Write to waveform ring buffer
-    {
-        const juce::ScopedLock sl (waveLock);
+    // ── Write to output ────────────────────────────────────────
+    for (int ch = 0; ch < numOutChannels; ++ch)
         for (int i = 0; i < numSamples; ++i)
-        {
-            waveBuf[waveBufPtr] = out[i];
-            waveBufPtr = (waveBufPtr + 1) % kWaveBufSize;
-        }
-    }
-
-    // Output
-    if (numOutputChannels > 0 && outputChannelData[0])
-        for (int i = 0; i < numSamples; ++i)
-            outputChannelData[0][i] = out[i];
-    if (numOutputChannels > 1 && outputChannelData[1])
-        for (int i = 0; i < numSamples; ++i)
-            outputChannelData[1][i] = out[i];
-
-    totalSamples += numSamples;
+            outData[ch][i] = out[i];
 }
 
 // ============================================================
-//  Sequencer — synced step for playhead display
+//  Built-in synthesis helpers (return AudioSampleBuffer for API
+//  compat, but we actually populate voices directly in ctor)
 // ============================================================
-int PulsefieldPage::getSyncedStep (int steps) const
-{
-    long long synced = juce::jmax (0LL, totalSamples - (long long) outputLatencySamples);
-    if (samplesPerStep <= 0) return 0;
-    return (int)((synced / samplesPerStep) % steps);
-}
-
-// ============================================================
-//  Paint
-// ============================================================
-void PulsefieldPage::paint (juce::Graphics& g)
-{
-    g.fillAll (kColBg);
-
-    drawBackground    (g);
-    drawCameraSection (g, cameraRect);
-    drawToolbar       (g, toolbarRect);
-    drawSequencer     (g, sequencerRect);
-    drawWaveformPanel (g, waveformRect);
-
-    if (confirmRow >= 0)  drawConfirmModal (g);
-    if (tapMode)          drawTapModal (g);
-}
-
-// ============================================================
-//  drawBackground — subtle grid
-// ============================================================
-void PulsefieldPage::drawBackground (juce::Graphics& g)
-{
-    g.setColour (juce::Colour (0x08004422));
-    for (int x = 0; x < getWidth();  x += 40) g.drawVerticalLine   (x, 0.0f, (float)getHeight());
-    for (int y = 0; y < getHeight(); y += 40) g.drawHorizontalLine (y, 0.0f, (float)getWidth());
-}
-
-// ============================================================
-//  drawSideGauge — vertical fill bar (matches Python _draw_side_gauge)
-// ============================================================
-void PulsefieldPage::drawSideGauge (juce::Graphics& g, juce::Rectangle<int> b,
-                                     float value, juce::Colour col, const juce::String& label)
-{
-    g.setColour (juce::Colour (0xff1e1e2a));
-    g.fillRoundedRectangle (b.toFloat(), 5.0f);
-
-    int fh = (int)(value * b.getHeight());
-    if (fh > 0)
-    {
-        auto fill = b.removeFromBottom (fh);
-        g.setColour (col);
-        g.fillRoundedRectangle (fill.toFloat(), 5.0f);
-        g.setColour (juce::Colours::white);
-        g.drawHorizontalLine (fill.getY(), (float)fill.getX(), (float)fill.getRight());
-    }
-
-    g.setColour (col);
-    g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
-    g.drawText (label, b.getX(), b.getBottom() + 3, b.getWidth(), 14,
-                juce::Justification::centred);
-}
-
-// ============================================================
-//  drawHandSkeleton — overlaid on camera rect
-// ============================================================
-void PulsefieldPage::drawHandSkeleton (juce::Graphics& g, juce::Rectangle<int> camBounds,
-                                        const HandLandmarks& hand)
-{
-    if (! hand.valid) return;
-
-    auto toPixel = [&](int lm) -> juce::Point<int>
-    {
-        // Mirror x to match the flipped camera feed
-        float px = (float) camBounds.getX() + (1.0f - hand.x[lm]) * (float) camBounds.getWidth();
-        float py = (float) camBounds.getY() + hand.y[lm] * (float) camBounds.getHeight();
-        return { (int)px, (int)py };
-    };
-
-    juce::Colour lineCol = hand.isRight ? kColFilter : kColTime;
-    g.setColour (lineCol);
-
-    for (int c = 0; c < kNumHandConns; ++c)
-    {
-        auto a = toPixel (kHandConns[c][0]);
-        auto b = toPixel (kHandConns[c][1]);
-        g.drawLine ((float)a.x, (float)a.y, (float)b.x, (float)b.y, 2.0f);
-    }
-
-    int fingertips[] = { 4, 8, 12, 16, 20 };
-    for (int lm = 0; lm < 21; ++lm)
-    {
-        auto pt = toPixel (lm);
-        bool isTip = false;
-        for (int f : fingertips) isTip |= (f == lm);
-        int r = isTip ? 5 : 3;
-        g.setColour (juce::Colours::white);
-        g.fillEllipse ((float)(pt.x - r), (float)(pt.y - r), (float)(r * 2), (float)(r * 2));
-        g.setColour (lineCol);
-        g.drawEllipse ((float)(pt.x - r), (float)(pt.y - r), (float)(r * 2), (float)(r * 2), 1.0f);
-    }
-}
-
-// ============================================================
-//  drawCameraSection
-// ============================================================
-void PulsefieldPage::drawCameraSection (juce::Graphics& g, juce::Rectangle<int> camBounds)
-{
-    // Left gauge: FILTER
-    float filterNorm = juce::jlimit (0.0f, 1.0f, 1.0f - (handYSmooth - 0.2f) / 0.5f);
-    drawSideGauge (g, leftGaugeRect, filterNorm, kColFilter, "FILTER");
-
-    // Right gauge 1: TIME
-    float timeNorm = delayTimeSmooth / 0.8f;
-    juce::Colour timeCol = delayLocked ? kColTimeLock : kColTime;
-    drawSideGauge (g, rightGauge1Rect, timeNorm, timeCol, "TIME");
-
-    // Right gauge 2: FB
-    float fbNorm = delayFeedbackSmooth / 0.85f;
-    drawSideGauge (g, rightGauge2Rect, fbNorm, kColFeedback, "FB");
-
-    // Camera frame (drawn by CameraView child component — just border here)
-    g.setColour (kColBorder);
-    g.drawRect (camBounds, 1);
-
-    // Hand skeleton overlays (drawn in paint order, on top of camera child)
-    HandsFrame frame;
-    {
-        const juce::ScopedLock sl (handsLock);
-        frame = latestHands;
-    }
-    for (int h = 0; h < frame.numHands; ++h)
-        drawHandSkeleton (g, camBounds, frame.hands[h]);
-
-    // Text hint overlays
-    g.setFont (juce::Font (juce::FontOptions().withHeight (11.0f)));
-    auto drawHint = [&](int x, int y, juce::Colour col, const juce::String& txt)
-    {
-        juce::String t = txt;
-        int tw = (int) g.getCurrentFont().getStringWidth (t) + 8;
-        g.setColour (juce::Colour (0x96000000));
-        g.fillRect (x - 4, y - 2, tw, 17);
-        g.setColour (col);
-        g.drawText (t, x, y, tw, 15, juce::Justification::centredLeft);
-    };
-    drawHint (camBounds.getX() + 6, camBounds.getY() + 6,
-              kColFilter, "R hand  height=filter  pinch=crush");
-    drawHint (camBounds.getX() + 6, camBounds.getBottom() - 20,
-              kColTime,   "L hand  tilt=echo time  height=feedback  peace=lock delay");
-
-    if (isFist)
-    {
-        g.setColour (juce::Colour (0xffffd200));
-        g.setFont (juce::Font (juce::FontOptions().withHeight (11.0f)));
-        g.drawText ("CRUSH ON", camBounds.getRight() - 90, camBounds.getY() + 6, 84, 15,
-                    juce::Justification::centredLeft);
-    }
-    if (delayLocked)
-    {
-        g.setColour (kColTimeLock);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (11.0f)));
-        g.drawText ("DELAY LOCKED", camBounds.getRight() - 106, camBounds.getBottom() - 20, 100, 15,
-                    juce::Justification::centredLeft);
-    }
-}
-
-// ============================================================
-//  drawToolbar
-// ============================================================
-void PulsefieldPage::drawToolbar (juce::Graphics& g, juce::Rectangle<int> tb)
-{
-    g.setColour (kColToolbar);
-    g.fillRect (tb);
-    g.setColour (kColBorder);
-    g.drawHorizontalLine (tb.getY(),       (float)tb.getX(), (float)tb.getRight());
-    g.drawHorizontalLine (tb.getBottom()-1, (float)tb.getX(), (float)tb.getRight());
-
-    int cx  = tb.getX() + 14;
-    int midy = tb.getCentreY();
-
-    // BPM
-    g.setColour (juce::Colour (0xffb4b4cd));
-    g.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-    juce::String bpmStr = juce::String (bpm) + " BPM";
-    g.drawText (bpmStr, cx, midy - 9, 80, 18, juce::Justification::centredLeft);
-    cx += g.getCurrentFont().getStringWidth (bpmStr) + 14;
-
-    // Step buttons
-    int sbw = 38, sbh = 24;
-    int stepOpts[] = { 8, 16, 32 };
-    for (int i = 0; i < 3; ++i)
-    {
-        auto r = juce::Rectangle<int> (cx, midy - sbh/2, sbw, sbh);
-        stepBtnRects[i] = r;
-        bool sel = (stepOpts[i] == activeSteps);
-        g.setColour (sel ? juce::Colour (0xff50508b) : juce::Colour (0xff2d2d41));
-        g.fillRoundedRectangle (r.toFloat(), 4.0f);
-        g.setColour (juce::Colours::white);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
-        g.drawText (juce::String (stepOpts[i]), r, juce::Justification::centred);
-        cx += sbw + 5;
-    }
-    cx += 16;
-
-    // REVERB label
-    g.setColour (kColReverb);
-    g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
-    g.drawText ("REVERB", cx, tb.getY() + 4, 56, 14, juce::Justification::centredLeft);
-
-    // Reverb SIZE slider
-    int slH = tb.getHeight() - 8;
-    int slY = tb.getY() + 4;
-    reverbSizeRect = juce::Rectangle<int> (cx, slY, 28, slH);
-    {
-        auto r = reverbSizeRect;
-        g.setColour (juce::Colour (0xff1e1e2a));
-        g.fillRoundedRectangle (r.toFloat(), 4.0f);
-        float normSize = (reverbSizeVal - 0.5f) / (3.0f - 0.5f);
-        int fh = (int)(normSize * r.getHeight());
-        if (fh > 0)
-        {
-            g.setColour (kColReverb);
-            g.fillRoundedRectangle (r.removeFromBottom (fh).toFloat(), 4.0f);
-        }
-        g.setColour (juce::Colours::white);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (9.0f)));
-        g.drawText ("SZ", reverbSizeRect.getX(), reverbSizeRect.getBottom() + 2,
-                    reverbSizeRect.getWidth(), 12, juce::Justification::centred);
-    }
-
-    // Reverb WET slider
-    reverbWetRect = juce::Rectangle<int> (cx + 34, slY, 28, slH);
-    {
-        auto r = reverbWetRect;
-        g.setColour (juce::Colour (0xff1e1e2a));
-        g.fillRoundedRectangle (r.toFloat(), 4.0f);
-        int fh = (int)(reverbWetVal * r.getHeight());
-        if (fh > 0)
-        {
-            g.setColour (kColReverb);
-            g.fillRoundedRectangle (r.removeFromBottom (fh).toFloat(), 4.0f);
-        }
-        g.setColour (juce::Colours::white);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (9.0f)));
-        g.drawText ("WET", reverbWetRect.getX(), reverbWetRect.getBottom() + 2,
-                    reverbWetRect.getWidth(), 12, juce::Justification::centred);
-    }
-
-    // SET BPM button (right-aligned)
-    tapBpmBtnRect = juce::Rectangle<int> (tb.getRight() - 124, midy - 16, 110, 32);
-    g.setColour (juce::Colour (0xffaf2020));
-    g.fillRoundedRectangle (tapBpmBtnRect.toFloat(), 7.0f);
-    g.setColour (juce::Colours::white);
-    g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f)));
-    g.drawText ("SET BPM", tapBpmBtnRect, juce::Justification::centred);
-}
-
-// ============================================================
-//  drawSequencer
-// ============================================================
-void PulsefieldPage::drawSequencer (juce::Graphics& g, juce::Rectangle<int> seqArea)
-{
-    const juce::ScopedLock sl (voiceLock);
-
-    int nRows    = (int) voices.size();
-    int stepOpts[] = { 8, 16, 32 };
-    int steps    = activeSteps;
-
-    static constexpr int kDelW  = 30;
-    static constexpr int kNameW = 70;
-    static constexpr int kVolW  = 18;
-    static constexpr int kPad   = 14;
-    static constexpr int kLeftW = kPad + kDelW + 6 + kNameW + 6 + kVolW + 8;
-
-    int gridW = seqArea.getWidth() - kLeftW - kPad;
-    int cw    = juce::jmax (8, gridW / steps);
-    seqCellW  = cw;
-    seqLeftX  = seqArea.getX() + kLeftW;
-    seqTopY   = seqArea.getY();
-
-    delBtnRects.clearQuick();
-    volSliderRects.clearQuick();
-
-    int visualStep = getSyncedStep (steps);
-
-    for (int r = 0; r < nRows; ++r)
-    {
-        int ry = seqArea.getY() + r * seqRowH;
-
-        // Row stripe
-        juce::Colour stripe = (r % 2 == 0) ? juce::Colour (0xff14141e) : juce::Colour (0xff0f0f16);
-        g.setColour (stripe);
-        g.fillRoundedRectangle ((float)(seqArea.getX() + kPad), (float)ry,
-                                 (float)(seqArea.getWidth() - kPad * 2), (float)(seqRowH - 3), 4.0f);
-
-        // DEL button
-        auto delR = juce::Rectangle<int> (seqArea.getX() + kPad, ry + (seqRowH - 26) / 2, kDelW, 26);
-        g.setColour (kColDel);
-        g.fillRoundedRectangle (delR.toFloat(), 5.0f);
-        g.setColour (juce::Colours::white);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
-        g.drawText ("DEL", delR, juce::Justification::centred);
-        delBtnRects.add (delR);
-
-        // Voice name
-        juce::String name = voices[r].name.substring (0, 10);
-        g.setColour (kColLabel);
-        g.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
-        int nameX = seqArea.getX() + kPad + kDelW + 6;
-        g.drawText (name, nameX, ry + (seqRowH - 14) / 2, kNameW, 14,
-                    juce::Justification::centredLeft);
-
-        // Volume slider
-        int volX = nameX + kNameW + 6;
-        auto volR = juce::Rectangle<int> (volX, ry + 7, kVolW, seqRowH - 14);
-        g.setColour (juce::Colour (0xff1e1e2a));
-        g.fillRoundedRectangle (volR.toFloat(), 4.0f);
-        float vol  = (r < (int) rowVolumes.size()) ? rowVolumes[r] : 0.8f;
-        int   volH = (int)(vol * volR.getHeight());
-        if (volH > 0)
-        {
-            g.setColour (kColVol);
-            g.fillRoundedRectangle (volR.removeFromBottom (volH).toFloat(), 4.0f);
-        }
-        volSliderRects.add (juce::Rectangle<int> (volX, ry + 7, kVolW, seqRowH - 14));
-
-        // Step cells
-        for (int c = 0; c < steps; ++c)
-        {
-            int cx2 = seqLeftX + c * cw;
-            auto cell = juce::Rectangle<int> (cx2 + 2, ry + 5, cw - 4, seqRowH - 12);
-
-            bool on = (c < (int) grid[r].size()) && grid[r][c];
-            juce::Colour base = on ? kColActive : kColInactive;
-
-            float flash = (c < (int) stepFlashes.size()) ? stepFlashes[c] : 0.0f;
-            base = base.brighter (flash * 0.5f);
-
-            if (c == visualStep)
-            {
-                g.setColour (juce::Colours::white);
-                g.drawRoundedRectangle (cell.expanded (2).toFloat(), 3.0f, 2.0f);
-                if (c < (int) stepFlashes.size())
-                    stepFlashes[c] = 1.0f;
-            }
-
-            g.setColour (base);
-            g.fillRoundedRectangle (cell.toFloat(), 3.0f);
-
-            // Beat divider every 4 steps
-            if (c > 0 && c % 4 == 0)
-            {
-                g.setColour (juce::Colour (0xff373748));
-                g.drawVerticalLine (cx2, (float)(ry + 4), (float)(ry + seqRowH - 6));
-            }
-        }
-    }
-
-    // Add voice button
-    int addY = seqArea.getY() + nRows * seqRowH + 10;
-    addVoiceBtnRect = juce::Rectangle<int> (seqLeftX, addY, 120, 30);
-    g.setColour (kColAdd);
-    g.fillRoundedRectangle (addVoiceBtnRect.toFloat(), 6.0f);
-    g.setColour (juce::Colours::white);
-    g.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
-    g.drawText ("+ Add voice", addVoiceBtnRect, juce::Justification::centred);
-}
-
-// ============================================================
-//  drawWaveformPanel
-// ============================================================
-void PulsefieldPage::drawWaveformPanel (juce::Graphics& g, juce::Rectangle<int> b)
-{
-    g.setColour (kColPanel);
-    g.fillRoundedRectangle (b.toFloat(), 8.0f);
-    g.setColour (kColBorder);
-    g.drawRoundedRectangle (b.toFloat(), 8.0f, 1.0f);
-
-    g.setColour (kColLabel);
-    g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
-    g.drawText ("LIVE WAVEFORM", b.getX() + 10, b.getY() + 8, b.getWidth() - 20, 14,
-                juce::Justification::centredLeft);
-
-    int innerY = b.getY() + 24;
-    int innerH = b.getHeight() - 34;
-    int innerW = b.getWidth() - 20;
-    int midY   = innerY + innerH / 2;
-
-    // Zero line
-    g.setColour (juce::Colour (0xff23283a));
-    g.drawHorizontalLine (midY, (float)(b.getX() + 10), (float)(b.getX() + 10 + innerW));
-
-    // Waveform
-    float waveCopy[kWaveBufSize];
-    int   wavePtr;
-    {
-        const juce::ScopedLock sl (waveLock);
-        std::copy (waveBuf, waveBuf + kWaveBufSize, waveCopy);
-        wavePtr = waveBufPtr;
-    }
-
-    if (innerW > 1)
-    {
-        juce::Path path;
-        for (int i = 0; i < innerW; ++i)
-        {
-            int idx = (wavePtr + i * kWaveBufSize / innerW) % kWaveBufSize;
-            float val = juce::jlimit (-1.0f, 1.0f, waveCopy[idx]);
-            float x = (float)(b.getX() + 10 + i);
-            float y = (float)midY - val * (float)(innerH / 2 - 3);
-            if (i == 0) path.startNewSubPath (x, y);
-            else        path.lineTo (x, y);
-        }
-        g.setColour (kColWaveform);
-        g.strokePath (path, juce::PathStrokeType (2.0f));
-    }
-
-    // Hit envelope flashes
-    {
-        const juce::ScopedLock sl (envLock);
-        for (const auto& env : hitEnvelopes)
-        {
-            if (env.pos >= env.len || env.len < 2) continue;
-            float fade = juce::jmax (0.0f, 1.0f - (float)env.pos / (float)env.len);
-            juce::Colour envCol = juce::Colour::fromRGB (0, (uint8_t)(255 * fade), (uint8_t)(110 * fade));
-            int envW = juce::jmin (innerW, 160);
-            juce::Path ep;
-            for (int i = 0; i < envW; ++i)
-            {
-                int idx = (int)((float)i / (float)envW * (float)env.len);
-                idx = juce::jlimit (0, env.len - 1, idx);
-                float val = juce::jlimit (-1.0f, 1.0f, env.data[idx]);
-                float x = (float)(b.getX() + 10 + i);
-                float y = (float)midY - val * (float)(innerH / 2 - 3);
-                if (i == 0) ep.startNewSubPath (x, y);
-                else        ep.lineTo (x, y);
-            }
-            g.setColour (envCol);
-            g.strokePath (ep, juce::PathStrokeType (1.0f));
-        }
-    }
-}
-
-// ============================================================
-//  drawTapModal
-// ============================================================
-void PulsefieldPage::drawTapModal (juce::Graphics& g)
-{
-    int W = getWidth(), H = getHeight();
-
-    g.setColour (juce::Colour (0xd2000000));
-    g.fillRect (getLocalBounds());
-
-    juce::Rectangle<int> box (W / 2 - 190, H / 2 - 95, 380, 190);
-    g.setColour (juce::Colour (0xff1e1e2c));
-    g.fillRoundedRectangle (box.toFloat(), 12.0f);
-    g.setColour (kColBorder);
-    g.drawRoundedRectangle (box.toFloat(), 12.0f, 1.0f);
-
-    g.setColour (juce::Colour (0xffe1e1e1));
-    g.setFont (juce::Font (juce::FontOptions().withHeight (16.0f)));
-    g.drawText ("TAP HERE   " + juce::String (bpm) + " BPM",
-                box, juce::Justification::centred);
-
-    g.setColour (juce::Colour (0xff78788a));
-    g.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
-    g.drawText ("Click repeatedly to set tempo",
-                box.getX(), box.getY() + 70, box.getWidth(), 20,
-                juce::Justification::centred);
-
-    // DONE button
-    tapModalRect = juce::Rectangle<int> (box.getCentreX() - 44, box.getBottom() - 46, 88, 30);
-    g.setColour (juce::Colour (0xff00b941));
-    g.fillRoundedRectangle (tapModalRect.toFloat(), 5.0f);
-    g.setColour (juce::Colours::white);
-    g.drawText ("DONE", tapModalRect, juce::Justification::centred);
-}
-
-// ============================================================
-//  drawConfirmModal
-// ============================================================
-void PulsefieldPage::drawConfirmModal (juce::Graphics& g)
-{
-    int W = getWidth(), H = getHeight();
-
-    g.setColour (juce::Colour (0xb4000000));
-    g.fillRect (getLocalBounds());
-
-    int bw = 340, bh = 160;
-    juce::Rectangle<int> box (W / 2 - bw / 2, H / 2 - bh / 2, bw, bh);
-    g.setColour (juce::Colour (0xff1c1c28));
-    g.fillRoundedRectangle (box.toFloat(), 12.0f);
-    g.setColour (kColBorder);
-    g.drawRoundedRectangle (box.toFloat(), 12.0f, 1.0f);
-
-    juce::String name = "Row " + juce::String (confirmRow);
-    {
-        const juce::ScopedLock sl (voiceLock);
-        if (confirmRow < (int) voices.size())
-            name = voices[confirmRow].name;
-    }
-
-    g.setColour (juce::Colour (0xffe6e6e6));
-    g.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-    g.drawText ("Remove  \"" + name + "\" ?",
-                box.getX(), box.getY() + 30, box.getWidth(), 20, juce::Justification::centred);
-
-    g.setColour (juce::Colour (0xff78788c));
-    g.setFont (juce::Font (juce::FontOptions().withHeight (11.0f)));
-    g.drawText ("This cannot be undone.",
-                box.getX(), box.getY() + 58, box.getWidth(), 16, juce::Justification::centred);
-
-    // YES button
-    juce::Rectangle<int> yesR (box.getCentreX() - 90, box.getBottom() - 50, 80, 30);
-    g.setColour (kColDel);
-    g.fillRoundedRectangle (yesR.toFloat(), 6.0f);
-    g.setColour (juce::Colours::white);
-    g.drawText ("Remove", yesR, juce::Justification::centred);
-
-    // NO button
-    juce::Rectangle<int> noR (box.getCentreX() + 10, box.getBottom() - 50, 80, 30);
-    g.setColour (juce::Colour (0xff2d2d41));
-    g.fillRoundedRectangle (noR.toFloat(), 6.0f);
-    g.setColour (juce::Colour (0xffc8c8c8));
-    g.drawText ("Cancel", noR, juce::Justification::centred);
-}
+juce::AudioSampleBuffer PulseFieldPage::synthKick()  { return {}; }
+juce::AudioSampleBuffer PulseFieldPage::synthSnare() { return {}; }
+juce::AudioSampleBuffer PulseFieldPage::synthHat()   { return {}; }
 
 // ============================================================
 //  resized
 // ============================================================
-void PulsefieldPage::resized()
+void PulseFieldPage::resized()
 {
-    int W = getWidth(), H = getHeight();
-    static constexpr int kPad         = 14;
-    static constexpr int kGaugeW      = 28;
-    static constexpr int kGaugeGap    = 6;
-    static constexpr int kToolbarH    = 52;
-    static constexpr int kSeqRowH     = 54;
-    static constexpr int kSideReserved = kGaugeW * 2 + kGaugeGap + kPad * 2 + 8;
+    int w = getWidth(), h = getHeight();
 
-    seqRowH = kSeqRowH;
+    backButton.setBounds (w - 100, 8, 80, 26);
 
-    // Camera
-    int camH = juce::jmin ((int)(H * 0.36f), 280);
-    int camW = (int)(camH * (4.0f / 3.0f));
-    camW = juce::jmin (camW, W - kSideReserved);
-    camH = (int)(camW * 0.75f);
-    int camX = (W - camW) / 2;
-    int camY = kPad;
+    const int PAD       = 12;
+    const int HEADER_H  = 36;
+    const int TOOLBAR_H = 46;
+    const int GAUGE_W   = 32;
+    const int GAUGE_GAP = 5;
+    const int VIZ_W     = 200;   // right visualizer column width
+
+    // ── Camera: 30% of height, 4:3, centred with flanking gauges ────────────
+    int camH = std::min ((int)(h * 0.30f), 240);
+    int camW = int(camH * (4.0f / 3.0f));
+    // Right side needs 2 gauges; left side 1 gauge + viz column reservation
+    int sideReserved = (GAUGE_W * 3 + GAUGE_GAP * 2) + PAD * 4 + VIZ_W;
+    if (camW > w - sideReserved)
+    {
+        camW = w - sideReserved;
+        camH = int(camW * 0.75f);
+    }
+    // Centre cam accounting for viz column on the right
+    int camX = (w - VIZ_W - camW) / 2;
+    int camY = HEADER_H;
+
     cameraRect = { camX, camY, camW, camH };
     cameraView.setBounds (cameraRect);
+    overlayView.setBounds (getLocalBounds());
 
-    // Side gauges
-    int lgX = camX - kGaugeW - 8;
-    leftGaugeRect = { lgX, camY, kGaugeW, camH };
+    int after       = camY + camH + PAD / 2;
+    toolbarRect     = { 0, after, w - VIZ_W - PAD, TOOLBAR_H };
+    int seqTop      = after + TOOLBAR_H + PAD;
 
-    int rg1X = camX + camW + 8;
-    rightGauge1Rect = { rg1X, camY, kGaugeW, camH };
+    // ── Right visualizer column: waveform top half, vectorscope bottom half ──
+    int vizX   = w - VIZ_W - PAD;
+    int vizTop = HEADER_H;
+    int vizH   = h - vizTop - PAD;
+    int waveH  = vizH / 2 - PAD / 2;
+    int vecH   = vizH - waveH - PAD;
 
-    int rg2X = rg1X + kGaugeW + kGaugeGap;
-    rightGauge2Rect = { rg2X, camY, kGaugeW, camH };
+    waveformRect    = { vizX, vizTop,              VIZ_W, waveH };
+    vectorscopeRect = { vizX, vizTop + waveH + PAD, VIZ_W, vecH  };
 
-    int camBottom = camY + camH;
-
-    // Toolbar
-    toolbarRect = { 0, camBottom + kPad / 2, W, kToolbarH };
-
-    int toolbarBottom = toolbarRect.getBottom();
-
-    // Waveform panel (bottom-right, spans height of sequencer area)
-    int nRows = (int) voices.size();
-    int waveW = juce::jmax (180, (int)(W * 0.26f));
-    int waveH = juce::jmax (120, nRows * kSeqRowH / 2);
-    waveformRect = { W - waveW - kPad, toolbarBottom + kPad, waveW, waveH };
-
-    // Sequencer occupies left/centre area below toolbar
-    sequencerRect = { 0, toolbarBottom + kPad,
-                      W - waveW - kPad * 2,
-                      nRows * kSeqRowH + 50 };  // +50 for add button
-
-    // Back button (top-right corner)
-    backButton.setBounds (W - 90, 8, 80, 28);
+    // ── Sequencer: fills left portion below toolbar ───────────────────────
+    int nRows = numRows;
+    int seqH  = nRows * seqRowH + 40;
+    sequencerRect   = { 0, seqTop, w - VIZ_W - PAD * 2, seqH };
+    gaugeSidebarRect = {};
 }
 
 // ============================================================
-//  Mouse
+//  paint — orchestrates all drawing
 // ============================================================
-void PulsefieldPage::mouseDown (const juce::MouseEvent& e)
+void PulseFieldPage::paint (juce::Graphics& g)
 {
-    int mx = e.x, my = e.y;
+    // Background + grid
+    drawBackground (g);
 
-    // ── Confirm modal takes priority ──────────────────────────────────────
+    // Camera border (camera content is a child component)
+    if (! cameraRect.isEmpty())
+    {
+        g.setColour (PF_BORDER_DIM);
+        g.drawRect  (cameraRect.toFloat(), 1.0f);
+    }
+
+    // Side gauges (flanking camera)
+    const int PAD      = 14;
+    const int GAUGE_W  = 36;
+    const int GAUGE_GAP= 6;
+
+    // Left: FILTER gauge
+    int lgX = cameraRect.getX() - GAUGE_W - 8;
+    float filterNorm = juce::jlimit (0.0f, 1.0f, 1.0f - (gesture.handY - 0.2f) / 0.5f);
+    drawSideGauge (g, { lgX, cameraRect.getY(), GAUGE_W, cameraRect.getHeight() },
+                   filterNorm, PF_COL_FILTER, "FILTER");
+
+    // Right: TIME, FB
+    int rg1X = cameraRect.getRight() + 8;
+    int rg2X = rg1X + GAUGE_W + GAUGE_GAP;
+    float timeNorm = gesture.delayTimeVal / 0.8f;
+    float fbNorm   = gesture.delayFeedback / 0.85f;
+    auto  timeCol  = gesture.delayLocked ? juce::Colour (0xffffff00) : PF_COL_TIME;
+    drawSideGauge (g, { rg1X, cameraRect.getY(), GAUGE_W, cameraRect.getHeight() },
+                   timeNorm, timeCol, "TIME");
+    drawSideGauge (g, { rg2X, cameraRect.getY(), GAUGE_W, cameraRect.getHeight() },
+                   fbNorm, PF_COL_FB, "FB");
+
+    // Toolbar
+    drawToolbar (g, toolbarRect);
+
+    // Sequencer
+    drawSequencer (g, sequencerRect);
+
+    // Right visualizer column
+    drawWaveformPanel  (g, waveformRect);
+    drawVectorscope    (g, vectorscopeRect);
+
+    // Confirm modal overlay
+    if (confirmRow >= 0)
+        drawConfirmModal (g);
+
+    // Tap modal overlay
+    if (tapMode)
+        drawTapModal (g);
+}
+
+// ============================================================
+//  Background + corner decorations
+// ============================================================
+void PulseFieldPage::drawBackground (juce::Graphics& g)
+{
+    g.fillAll (PF_BG_DARK);
+
+    // Subtle scan-line grid
+    g.setColour (juce::Colour (0x06ff3333));
+    for (int x = 0; x < getWidth();  x += 40) g.drawVerticalLine   (x, 0.0f, (float)getHeight());
+    for (int y = 0; y < getHeight(); y += 40) g.drawHorizontalLine (y, 0.0f, (float)getWidth());
+
+    // Corner brackets
+    auto b = getLocalBounds().toFloat();
+    g.setColour (juce::Colour (0xaaff3333));
+    float bL = 20.0f;
+    g.drawLine (b.getX(),          b.getY(),           b.getX() + bL,      b.getY(),           1.5f);
+    g.drawLine (b.getX(),          b.getY(),           b.getX(),            b.getY() + bL,      1.5f);
+    g.drawLine (b.getRight() - bL, b.getY(),           b.getRight(),        b.getY(),           1.5f);
+    g.drawLine (b.getRight(),      b.getY(),           b.getRight(),        b.getY() + bL,      1.5f);
+    g.drawLine (b.getX(),          b.getBottom(),      b.getX() + bL,      b.getBottom(),      1.5f);
+    g.drawLine (b.getX(),          b.getBottom() - bL, b.getX(),            b.getBottom(),      1.5f);
+    g.drawLine (b.getRight() - bL, b.getBottom(),      b.getRight(),        b.getBottom(),      1.5f);
+    g.drawLine (b.getRight(),      b.getBottom() - bL, b.getRight(),        b.getBottom(),      1.5f);
+
+    // Title
+    g.setColour (PF_ACCENT);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (14.0f)));
+    g.drawText  ("// PULSEFIELD", 28, 8, 300, 24, juce::Justification::centredLeft);
+
+    // Top glow gradient
+    juce::ColourGradient grad (juce::Colours::transparentBlack, b.getX(), b.getY(),
+                                juce::Colours::transparentBlack, b.getRight(), b.getY(), false);
+    grad.addColour (0.2, juce::Colour (0x55ff3333));
+    grad.addColour (0.5, juce::Colour (0xffff3333));
+    grad.addColour (0.8, juce::Colour (0x55ff3333));
+    g.setGradientFill (grad);
+    g.fillRect (b.getX(), b.getY(), b.getWidth(), 1.5f);
+}
+
+// ============================================================
+//  Side gauge (tall bar flanking camera)
+// ============================================================
+void PulseFieldPage::drawSideGauge (juce::Graphics& g, juce::Rectangle<int> bounds,
+                                     float normVal, juce::Colour colour,
+                                     const juce::String& label)
+{
+    // Track
+    g.setColour (juce::Colour (0xff1a1a1a));
+    g.fillRect  (bounds.toFloat());
+    g.setColour (PF_BORDER_DIM);
+    g.drawRect  (bounds.toFloat(), 1.0f);
+
+    // Fill
+    int fh = int(normVal * bounds.getHeight());
+    if (fh > 0)
+    {
+        auto fillR = bounds.removeFromBottom (fh);
+        g.setColour (colour.withAlpha (0.55f));
+        g.fillRect  (fillR.toFloat());
+        // Bright tip
+        g.setColour (colour);
+        g.fillRect  ((float)fillR.getX(), (float)fillR.getY(),
+                     (float)fillR.getWidth(), 2.0f);
+    }
+
+    // Label below
+    g.setColour (colour);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  (label, juce::Rectangle<int> (bounds.getX(), bounds.getBottom() + 4,
+                 bounds.getWidth(), 12), juce::Justification::centred);
+}
+
+// ============================================================
+//  Toolbar strip (below camera)
+// ============================================================
+void PulseFieldPage::drawToolbar (juce::Graphics& g, juce::Rectangle<int> tb)
+{
+    g.setColour (juce::Colour (0xff0a0a0a));
+    g.fillRect  (tb);
+    g.setColour (PF_BORDER_DIM);
+    g.drawHorizontalLine (tb.getY(),      (float)tb.getX(), (float)tb.getRight());
+    g.drawHorizontalLine (tb.getBottom(), (float)tb.getX(), (float)tb.getRight());
+
+    const int PAD = 14;
+    int curX = PAD;
+    int midY = tb.getCentreY();
+
+    // BPM readout
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (15.0f)));
+    juce::String bpmStr = juce::String (bpm) + " BPM";
+    g.drawText  (bpmStr, curX, midY - 10, 90, 20, juce::Justification::centredLeft);
+    curX += 95;
+
+    // Step-count buttons [8 | 16 | 32]
+    const int sbW = 38, sbH = 26;
+    for (int i = 0; i < 3; ++i)
+    {
+        juce::Rectangle<int> r { curX, midY - sbH / 2, sbW, sbH };
+        stepBtnRects[i] = r;
+        bool isActive = (STEP_OPTIONS[i] == activeSteps);
+        g.setColour (isActive ? PF_ACCENT.withAlpha (0.8f)
+                              : juce::Colour (0xff2a2a2a));
+        g.fillRect  (r.toFloat());
+        g.setColour (isActive ? PF_BORDER_HOT : PF_BORDER_DIM);
+        g.drawRect  (r.toFloat(), 1.0f);
+        g.setColour (isActive ? PF_TEXT_PRI : PF_TEXT_DIM);
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (13.0f)));
+        g.drawText  (juce::String (STEP_OPTIONS[i]), r, juce::Justification::centred);
+        curX += sbW + 5;
+    }
+
+    curX += 16;
+
+    // REVERB label + two mini horizontal sliders (SIZE / WET)
+    g.setColour (PF_COL_REVERB.withAlpha (0.8f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  ("REVERB", curX, tb.getY() + 4, 50, 12, juce::Justification::centredLeft);
+
+    auto drawMiniSlider = [&](HSlider& sl, const juce::String& name, int x)
+    {
+        juce::Rectangle<int> track { x, midY - 10, 28, 20 };
+        sl.rect = track;
+
+        g.setColour (juce::Colour (0xff1a1a1a));
+        g.fillRect  (track.toFloat());
+        g.setColour (PF_BORDER_DIM);
+        g.drawRect  (track.toFloat(), 1.0f);
+
+        int fillH = int(sl.normVal() * track.getHeight());
+        if (fillH > 0)
+        {
+            g.setColour (PF_COL_REVERB.withAlpha (0.7f));
+            g.fillRect  ((float)track.getX(),
+                         (float)(track.getBottom() - fillH),
+                         (float)track.getWidth(), (float)fillH);
+        }
+        // Bright handle line
+        int handleY = track.getBottom() - fillH;
+        g.setColour (juce::Colours::white.withAlpha (0.6f));
+        g.drawHorizontalLine (handleY, (float)track.getX(), (float)track.getRight());
+
+        g.setColour (PF_TEXT_DIM);
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (8.0f)));
+        g.drawText  (name, juce::Rectangle<int> (track.getX(), track.getBottom() + 2,
+                     track.getWidth(), 10), juce::Justification::centred);
+    };
+
+    drawMiniSlider (sliderSize, "SZ",  curX);
+    drawMiniSlider (sliderWet,  "WET", curX + 34);
+    curX += 80;
+
+    // SET BPM button (right-aligned)
+    int tapW = 100, tapH = 30;
+    tapBtnRect = { tb.getRight() - PAD - tapW, midY - tapH / 2, tapW, tapH };
+
+    g.setColour (isPaused && tapMode ? PF_ACCENT.withAlpha (0.9f)
+                                     : juce::Colour (0xff2a1010));
+    g.fillRect  (tapBtnRect.toFloat());
+    g.setColour (PF_ACCENT_DIM);
+    g.drawRect  (tapBtnRect.toFloat(), 1.0f);
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (13.0f)));
+    g.drawText  ("SET BPM", tapBtnRect, juce::Justification::centred);
+}
+
+// ============================================================
+//  Sequencer rows
+// ============================================================
+void PulseFieldPage::drawSequencer (juce::Graphics& g, juce::Rectangle<int> bounds)
+{
+    const int PAD   = 14;
+    const int DEL_W = 30;
+    const int NAME_W= 70;
+    const int VOL_W = 18;
+    const int LEFT_W= PAD + DEL_W + 6 + NAME_W + 6 + VOL_W + 8;
+
+    seqLeft  = bounds.getX() + LEFT_W;
+    int gridW = bounds.getWidth() - LEFT_W - PAD;
+    seqCellW  = std::max (8, gridW / activeSteps);
+
+    // Figure out current visual step (based on audio engine output position)
+    int samplesPerStep = std::max (1, (int)(eng.sampleRate * 60.0 / bpm / 2.0));
+    int visualStep = 0;
+    if (samplesPerStep > 0)
+        visualStep = (eng.totalSamplesOut / samplesPerStep) % activeSteps;
+
+    int rowTop = bounds.getY();
+
+    const juce::ScopedLock sl (voiceLock);
+
+    for (int r = 0; r < numRows; ++r)
+    {
+        int ry = rowTop + r * seqRowH;
+
+        // Row stripe
+        g.setColour (r % 2 == 0 ? PF_BG_ROW_A : PF_BG_ROW_B);
+        g.fillRect  (juce::Rectangle<int> { PAD, ry, bounds.getWidth() - PAD, seqRowH - 3 }.toFloat());
+        g.setColour (PF_BORDER_DIM);
+        g.drawRect  (juce::Rectangle<int> { PAD, ry, bounds.getWidth() - PAD, seqRowH - 3 }.toFloat(), 1.0f);
+
+        // Delete button
+        juce::Rectangle<int> delR { PAD, ry + (seqRowH - 22) / 2, DEL_W, 22 };
+        delBtnRects[r] = delR;
+        g.setColour (juce::Colour (0xff551111));
+        g.fillRect  (delR.toFloat());
+        g.setColour (PF_ACCENT_DIM);
+        g.drawRect  (delR.toFloat(), 1.0f);
+        g.setColour (PF_TEXT_PRI);
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+        g.drawText  ("DEL", delR, juce::Justification::centred);
+
+        // Voice name
+        juce::String name = (r < (int)voices.size() ? voices[r].name : "R" + juce::String(r));
+        name = name.substring (0, 10);
+        g.setColour (PF_TEXT_DIM);
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (11.0f)));
+        g.drawText  (name, juce::Rectangle<int> (PAD + DEL_W + 6, ry + (seqRowH - 14) / 2, NAME_W, 14),
+                     juce::Justification::centredLeft);
+
+        // Volume slider
+        auto& vs = volSliders[r];
+        int vx   = PAD + DEL_W + 6 + NAME_W + 6;
+        vs.rect  = { vx, ry + 7, VOL_W, seqRowH - 14 };
+        float fillH = vs.value * vs.rect.getHeight();
+        g.setColour (juce::Colour (0xff1a1a1a));
+        g.fillRect  (vs.rect.toFloat());
+        g.setColour (PF_BORDER_DIM);
+        g.drawRect  (vs.rect.toFloat(), 1.0f);
+        if (fillH > 0)
+        {
+            g.setColour (juce::Colour (0xff882233).withAlpha (0.8f));
+            g.fillRect  ((float)vs.rect.getX(),
+                         (float)(vs.rect.getBottom() - (int)fillH),
+                         (float)vs.rect.getWidth(), fillH);
+        }
+
+        // Step cells
+        for (int c = 0; c < activeSteps; ++c)
+        {
+            int cellX = seqLeft + c * seqCellW;
+            juce::Rectangle<int> cell { cellX + 2, ry + 5, seqCellW - 4, seqRowH - 12 };
+            bool isOn = (c < MAX_STEPS && grid[r][c]);
+
+            // Playhead highlight
+            if (c == visualStep)
+            {
+                g.setColour (PF_TEXT_PRI.withAlpha (0.6f));
+                g.drawRect  (cell.expanded (2).toFloat(), 1.5f);
+                if (c < MAX_STEPS) stepFlash[c] = 1.0f;
+            }
+
+            // Cell fill
+            float flash = (c < MAX_STEPS ? stepFlash[c] : 0.0f);
+            if (isOn)
+            {
+                g.setColour (PF_COL_ACTIVE.withAlpha (0.55f + flash * 0.4f));
+                g.fillRect  (cell.toFloat());
+                g.setColour (PF_BORDER_HOT);
+                g.drawRect  (cell.toFloat(), 1.0f);
+            }
+            else
+            {
+                g.setColour (PF_COL_INACT.withAlpha (0.8f + flash * 0.2f));
+                g.fillRect  (cell.toFloat());
+            }
+
+            // Beat-group divider every 4 steps
+            if (c > 0 && c % 4 == 0)
+            {
+                g.setColour (PF_BORDER_DIM);
+                g.drawVerticalLine (cellX, (float)(ry + 4), (float)(ry + seqRowH - 6));
+            }
+        }
+    }
+
+    // Add-voice button
+    int addY = rowTop + numRows * seqRowH + 10;
+    addBtnRect = { seqLeft, addY, 120, 28 };
+    g.setColour (juce::Colour (0xff1a0a0a));
+    g.fillRect  (addBtnRect.toFloat());
+    g.setColour (PF_BORDER_DIM);
+    g.drawRect  (addBtnRect.toFloat(), 1.0f);
+    g.setColour (PF_TEXT_DIM);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (12.0f)));
+    g.drawText  ("+ Add voice", addBtnRect, juce::Justification::centred);
+}
+
+// ============================================================
+//  Waveform panel (oscilloscope)
+// ============================================================
+void PulseFieldPage::drawWaveformPanel (juce::Graphics& g, juce::Rectangle<int> bounds)
+{
+    // Background with subtle inner glow on the border
+    g.setColour (PF_BG_CARD);
+    g.fillRect  (bounds.toFloat());
+    g.setColour (PF_BORDER_DIM);
+    g.drawRect  (bounds.toFloat(), 1.0f);
+
+    // Subtle horizontal centre line
+    float cy = (float)bounds.getCentreY();
+    g.setColour (juce::Colour (0x18ff2222));
+    g.drawHorizontalLine ((int)cy, (float)bounds.getX(), (float)bounds.getRight());
+
+    // Label
+    g.setColour (PF_ACCENT.withAlpha (0.6f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (8.0f)));
+    g.drawText  ("OSCILLOSCOPE", juce::Rectangle<int> (bounds.getX() + 5, bounds.getY() + 3,
+                 bounds.getWidth() - 10, 11), juce::Justification::centredLeft);
+
+    if (waveformSnap.empty()) return;
+
+    const int   pad   = 8;
+    const float cx0   = (float)(bounds.getX() + pad);
+    const float amp   = (float)(bounds.getHeight() / 2 - pad - 6);
+    const float ww    = (float)(bounds.getWidth() - pad * 2);
+    const int   N     = (int)waveformSnap.size();
+    // Downsample to pixel width for clarity
+    const int   draw  = std::min (N, bounds.getWidth() - pad * 2);
+
+    // Glow pass (wide, very dim)
+    juce::Path glow;
+    for (int i = 0; i < draw; ++i)
+    {
+        int   si = (int)((float)i / (float)(draw - 1) * (N - 1));
+        float x  = cx0 + (float)i / (float)(draw - 1) * ww;
+        float y  = cy  - juce::jlimit (-1.0f, 1.0f, waveformSnap[si]) * amp;
+        if (i == 0) glow.startNewSubPath (x, y);
+        else        glow.lineTo (x, y);
+    }
+    g.setColour (PF_COL_WAVE.withAlpha (0.07f));
+    g.strokePath (glow, juce::PathStrokeType (6.0f));
+
+    // Mid glow
+    g.setColour (PF_COL_WAVE.withAlpha (0.18f));
+    g.strokePath (glow, juce::PathStrokeType (2.5f));
+
+    // Sharp core line
+    g.setColour (PF_COL_WAVE.withAlpha (0.85f));
+    g.strokePath (glow, juce::PathStrokeType (1.0f));
+
+    // Hit-envelope flashes — now drawn in deep red/crimson, fading from bright to dark
+    {
+        const juce::ScopedLock sl (hitEnvLock);
+        for (const auto& env : hitEnvelopes)
+        {
+            const juce::ScopedLock sl2 (voiceLock);
+            if (env.voiceIdx >= (int)voices.size()) continue;
+            const auto& data = voices[env.voiceIdx].samples;
+            if (data.empty()) continue;
+
+            float fade = juce::jlimit (0.0f, 1.0f, 1.0f - (float)env.pos / (float)data.size());
+            if (fade < 0.01f) continue;
+
+            int envN = std::min (bounds.getWidth() - pad * 2, draw);
+            juce::Path ep;
+            for (int i = 0; i < envN; ++i)
+            {
+                int   si = (int)((float)i / (float)(envN - 1) * (data.size() - 1));
+                float x  = cx0 + (float)i / (float)(envN - 1) * ww;
+                float y  = cy  - juce::jlimit (-1.0f, 1.0f, data[si]) * amp;
+                if (i == 0) ep.startNewSubPath (x, y);
+                else        ep.lineTo (x, y);
+            }
+            // Bright red flash fading to dark
+            g.setColour (juce::Colour (0xffff2222).withAlpha (fade * 0.9f));
+            g.strokePath (ep, juce::PathStrokeType (1.5f));
+            g.setColour (juce::Colour (0xffff2222).withAlpha (fade * 0.15f));
+            g.strokePath (ep, juce::PathStrokeType (4.0f));
+        }
+    }
+}
+
+// ============================================================
+//  Vectorscope (Lissajous) — L vs R delayed signal
+// ============================================================
+void PulseFieldPage::drawVectorscope (juce::Graphics& g, juce::Rectangle<int> bounds)
+{
+    g.setColour (PF_BG_CARD);
+    g.fillRect  (bounds.toFloat());
+
+    if (vecSnapL.empty()) return;
+
+    // Initialize or resize the trail buffer if needed
+    if (!vecTrailBuffer.isValid() || vecTrailBuffer.getWidth() != bounds.getWidth())
+        vecTrailBuffer = juce::Image (juce::Image::ARGB, bounds.getWidth(), bounds.getHeight(), true);
+
+    // 1. Fade the old trails
+    {
+        juce::Graphics gBuf (vecTrailBuffer);
+        gBuf.setColour (PF_BG_CARD.withAlpha (0.2f)); // Control trail length here
+        gBuf.fillRect (vecTrailBuffer.getBounds());
+    }
+
+    // 2. Draw the new vector frame into the buffer
+    {
+        juce::Graphics gBuf (vecTrailBuffer);
+        float cx = bounds.getWidth() * 0.5f;
+        float cy = bounds.getHeight() * 0.5f;
+        float rad = std::min (cx, cy) - 10.0f;
+
+        gBuf.setColour (PF_COL_VEC);
+        for (size_t i = 1; i < vecSnapL.size(); ++i) {
+            gBuf.drawLine (cx + vecSnapL[i-1] * rad, cy - vecSnapR[i-1] * rad,
+                           cx + vecSnapL[i]   * rad, cy - vecSnapR[i]   * rad, 1.2f);
+        }
+    }
+
+    // 3. Draw the buffered trails to the screen
+    g.drawImageAt (vecTrailBuffer, bounds.getX(), bounds.getY());
+}
+
+// ============================================================
+//  Hand skeleton overlay (drawn by overlayView above cameraView)
+// ============================================================
+static const int HAND_CONNECTIONS[23][2] = {
+    {0,1},{1,2},{2,3},{3,4},
+    {0,5},{5,6},{6,7},{7,8},
+    {0,9},{9,10},{10,11},{11,12},
+    {0,13},{13,14},{14,15},{15,16},
+    {0,17},{17,18},{18,19},{19,20},
+    {5,9},{9,13},{13,17}
+};
+static constexpr int NUM_HAND_CONNECTIONS = 23;
+
+void PulseFieldPage::drawHandSkeleton (juce::Graphics& g)
+{
+    // Decode latest OSC hand data
+    float numHandsF = oscHandsData[0].load (std::memory_order_relaxed);
+    int nh = juce::jlimit (0, 2, (int)numHandsF);
+
+    for (int hi = 0; hi < nh; ++hi)
+    {
+        int   base    = 1 + hi * 43;
+        float labelF  = oscHandsData[base].load (std::memory_order_relaxed);
+        bool  isRight = (labelF > 0.5f);
+
+        // Pixel coords inside cameraRect (normalised -> pixel, un-mirrored)
+        juce::Point<float> pts[21];
+        for (int li = 0; li < 21; ++li)
+        {
+            float nx = oscHandsData[base + 1 + li * 2    ].load (std::memory_order_relaxed);
+            float ny = oscHandsData[base + 1 + li * 2 + 1].load (std::memory_order_relaxed);
+            pts[li] = {
+                (float)cameraRect.getX() + nx * (float)cameraRect.getWidth(),
+                (float)cameraRect.getY() + ny * (float)cameraRect.getHeight()
+            };
+        }
+
+        juce::Colour lineCol = isRight ? PF_COL_FILTER : PF_COL_TIME;
+        g.setColour (lineCol.withAlpha (0.8f));
+
+        for (int ci = 0; ci < NUM_HAND_CONNECTIONS; ++ci)
+        {
+            int a = HAND_CONNECTIONS[ci][0];
+            int b = HAND_CONNECTIONS[ci][1];
+            g.drawLine (pts[a].x, pts[a].y, pts[b].x, pts[b].y, 1.5f);
+        }
+
+        // Landmark dots
+        for (int li = 0; li < 21; ++li)
+        {
+            bool isTip = (li == 4 || li == 8 || li == 12 || li == 16 || li == 20);
+            float r = isTip ? 4.5f : 2.5f;
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.fillEllipse (pts[li].x - r, pts[li].y - r, r * 2.0f, r * 2.0f);
+            g.setColour (lineCol.withAlpha (0.9f));
+            g.drawEllipse (pts[li].x - r, pts[li].y - r, r * 2.0f, r * 2.0f, 1.0f);
+        }
+
+        // Pinch indicator (thumb-4 ↔ index-8)
+        float pinchDist = std::hypot (
+            oscHandsData[base + 1 + 4 * 2    ].load() - oscHandsData[base + 1 + 8 * 2    ].load(),
+            oscHandsData[base + 1 + 4 * 2 + 1].load() - oscHandsData[base + 1 + 8 * 2 + 1].load());
+        if (isRight && pinchDist < 0.055f)
+        {
+            auto mid = (pts[4] + pts[8]) * 0.5f;
+            g.setColour (juce::Colours::white.withAlpha (0.7f));
+            g.drawEllipse (mid.x - 10, mid.y - 10, 20.0f, 20.0f, 1.5f);
+        }
+    }
+}
+
+// ============================================================
+//  Camera hint overlays
+// ============================================================
+void PulseFieldPage::drawCamOverlays (juce::Graphics& g)
+{
+    auto drawHint = [&](int x, int y, juce::Colour col, const juce::String& txt)
+    {
+        g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
+        int tw = g.getCurrentFont().getStringWidth (txt) + 8;
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        g.fillRect  ((float)(x - 4), (float)(y - 2), (float)tw, 15.0f);
+        g.setColour (col);
+        g.drawText  (txt, x, y, tw, 13, juce::Justification::centredLeft);
+    };
+
+    drawHint (cameraRect.getX() + 6, cameraRect.getY() + 6,
+              PF_COL_FILTER, "R: height=filter  pinch=crush");
+    drawHint (cameraRect.getX() + 6, cameraRect.getBottom() - 20,
+              PF_COL_TIME,   "L: tilt=time  height=fb  V=lock delay");
+
+    if (gesture.isFist)
+    {
+        g.setColour (juce::Colour (0xffffff44));
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (10.0f)));
+        g.drawText  ("CRUSH ON",
+                     cameraRect.getRight() - 85, cameraRect.getY() + 6,
+                     80, 13, juce::Justification::centredLeft);
+    }
+    if (gesture.delayLocked)
+    {
+        g.setColour (juce::Colour (0xffffff00));
+        g.setFont   (juce::Font (juce::FontOptions().withHeight (10.0f)));
+        g.drawText  ("DELAY LOCKED",
+                     cameraRect.getRight() - 100, cameraRect.getBottom() - 20,
+                     95, 13, juce::Justification::centredLeft);
+    }
+}
+
+// ============================================================
+//  Confirm-delete modal
+// ============================================================
+void PulseFieldPage::drawConfirmModal (juce::Graphics& g)
+{
+    // Dark overlay
+    g.setColour (juce::Colours::black.withAlpha (0.7f));
+    g.fillRect  (getLocalBounds().toFloat());
+
+    int bw = 340, bh = 160;
+    int bx = (getWidth()  - bw) / 2;
+    int by = (getHeight() - bh) / 2;
+    juce::Rectangle<int> box { bx, by, bw, bh };
+
+    g.setColour (PF_BG_CARD);
+    g.fillRoundedRectangle (box.toFloat(), 8.0f);
+    g.setColour (PF_BORDER_DIM);
+    g.drawRoundedRectangle (box.toFloat(), 8.0f, 1.0f);
+
+    juce::String vName = (confirmRow < (int)voices.size()
+                          ? voices[confirmRow].name
+                          : "Row " + juce::String (confirmRow));
+
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (14.0f)));
+    g.drawText  ("Remove \"" + vName + "\" ?",
+                 box.getX() + 20, box.getY() + 28, bw - 40, 20,
+                 juce::Justification::centred);
+
+    g.setColour (PF_TEXT_DIM);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (10.0f)));
+    g.drawText  ("This cannot be undone.",
+                 box.getX() + 20, box.getY() + 54, bw - 40, 14,
+                 juce::Justification::centred);
+
+    confirmYesRect = { box.getCentreX() - 90, box.getBottom() - 48, 80, 28 };
+    confirmNoRect  = { box.getCentreX() + 10, box.getBottom() - 48, 80, 28 };
+
+    g.setColour (juce::Colour (0xff881111));
+    g.fillRoundedRectangle (confirmYesRect.toFloat(), 5.0f);
+    g.setColour (juce::Colour (0xff2a2a2a));
+    g.fillRoundedRectangle (confirmNoRect.toFloat(),  5.0f);
+    g.setColour (PF_BORDER_DIM);
+    g.drawRoundedRectangle (confirmYesRect.toFloat(), 5.0f, 1.0f);
+    g.drawRoundedRectangle (confirmNoRect.toFloat(),  5.0f, 1.0f);
+
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (12.0f)));
+    g.drawText  ("Remove", confirmYesRect, juce::Justification::centred);
+    g.drawText  ("Cancel", confirmNoRect,  juce::Justification::centred);
+}
+
+// ============================================================
+//  Tap-tempo modal
+// ============================================================
+void PulseFieldPage::drawTapModal (juce::Graphics& g)
+{
+    g.setColour (juce::Colours::black.withAlpha (0.82f));
+    g.fillRect  (getLocalBounds().toFloat());
+
+    int bw = 380, bh = 190;
+    int bx = (getWidth()  - bw) / 2;
+    int by = (getHeight() - bh) / 2;
+    juce::Rectangle<int> box { bx, by, bw, bh };
+
+    g.setColour (PF_BG_CARD);
+    g.fillRoundedRectangle (box.toFloat(), 10.0f);
+    g.setColour (PF_BORDER_DIM);
+    g.drawRoundedRectangle (box.toFloat(), 10.0f, 1.0f);
+
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (16.0f)));
+    g.drawText  ("TAP HERE   " + juce::String (bpm) + " BPM",
+                 box.getX(), box.getY() + 44, bw, 22, juce::Justification::centred);
+
+    g.setColour (PF_TEXT_DIM);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (11.0f)));
+    g.drawText  ("Click repeatedly to set tempo",
+                 box.getX(), box.getY() + 76, bw, 16, juce::Justification::centred);
+
+    // DONE button
+    juce::Rectangle<int> doneR { box.getCentreX() - 44, box.getBottom() - 46, 88, 30 };
+    tapBtnRect = doneR;   // reuse tapBtnRect for the DONE button inside modal
+    g.setColour (juce::Colour (0xff114422));
+    g.fillRoundedRectangle (doneR.toFloat(), 5.0f);
+    g.setColour (PF_BORDER_DIM);
+    g.drawRoundedRectangle (doneR.toFloat(), 5.0f, 1.0f);
+    g.setColour (PF_TEXT_PRI);
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (13.0f)));
+    g.drawText  ("DONE", doneR, juce::Justification::centred);
+}
+
+// ============================================================
+//  Hit-test helpers
+// ============================================================
+int PulseFieldPage::hitStepCell (juce::Point<int> pos) const
+{
+    if (seqCellW <= 0) return -1;
+    int col = (pos.x - seqLeft) / seqCellW;
+    int row = (pos.y - sequencerRect.getY()) / seqRowH;
+    if (row < 0 || row >= numRows || col < 0 || col >= activeSteps) return -1;
+    juce::Rectangle<int> cell {
+        seqLeft + col * seqCellW + 2,
+        sequencerRect.getY() + row * seqRowH + 5,
+        seqCellW - 4, seqRowH - 12 };
+    if (! cell.contains (pos)) return -1;
+    return (row << 8) | col;
+}
+
+int PulseFieldPage::hitStepBtn (juce::Point<int> pos) const
+{
+    for (int i = 0; i < 3; ++i)
+        if (stepBtnRects[i].contains (pos))
+            return STEP_OPTIONS[i];
+    return 0;
+}
+
+bool PulseFieldPage::hitAddBtn (juce::Point<int> pos) const
+{
+    return addBtnRect.contains (pos);
+}
+
+int PulseFieldPage::hitDelBtn (juce::Point<int> pos) const
+{
+    for (int r = 0; r < numRows; ++r)
+        if (delBtnRects[r].contains (pos)) return r;
+    return -1;
+}
+
+bool PulseFieldPage::hitTapBtn (juce::Point<int> pos) const
+{
+    return tapBtnRect.contains (pos);
+}
+
+bool PulseFieldPage::hitConfirmYes (juce::Point<int> pos) const
+{
+    return confirmYesRect.contains (pos);
+}
+
+bool PulseFieldPage::hitConfirmNo (juce::Point<int> pos) const
+{
+    return confirmNoRect.contains (pos);
+}
+
+// ============================================================
+//  Mouse events
+// ============================================================
+void PulseFieldPage::mouseDown (const juce::MouseEvent& e)
+{
+    auto pos = e.getPosition();
+
+    // ── Confirm-delete modal takes priority ────────────────────
     if (confirmRow >= 0)
     {
-        int W = getWidth(), H = getHeight();
-        int bw = 340, bh = 160;
-        juce::Rectangle<int> box (W/2 - bw/2, H/2 - bh/2, bw, bh);
-        juce::Rectangle<int> yesR (box.getCentreX()-90, box.getBottom()-50, 80, 30);
-        juce::Rectangle<int> noR  (box.getCentreX()+10, box.getBottom()-50, 80, 30);
-        if (yesR.contains (mx, my))
+        if (hitConfirmYes (pos))
         {
-            removeVoice (confirmRow);
+            int row = confirmRow;
             confirmRow = -1;
-            resized();
+            // Remove voice + grid row
+            {
+                const juce::ScopedLock sl (voiceLock);
+                if ((int)voices.size() > 1 && row < (int)voices.size())
+                {
+                    voices.erase (voices.begin() + row);
+                    // Shift grid rows up
+                    for (int r = row; r < MAX_ROWS - 1; ++r)
+                        std::memcpy (grid[r], grid[r + 1], sizeof(grid[0]));
+                    std::memset (grid[MAX_ROWS - 1], 0, sizeof(grid[0]));
+                    numRows = (int)voices.size();
+                }
+            }
         }
-        else if (noR.contains (mx, my))
+        else if (hitConfirmNo (pos))
         {
             confirmRow = -1;
         }
+        repaint();
         return;
     }
 
-    // ── Tap tempo modal ────────────────────────────────────────────────────
+    // ── Tap modal ──────────────────────────────────────────────
     if (tapMode)
     {
-        if (tapModalRect.contains (mx, my))
+        if (hitTapBtn (pos))
         {
-            tapMode = false;
-            {
-                const juce::ScopedLock sl (fxLock);
-                fxParams.paused = false;
-            }
+            tapMode   = false;
+            isPaused  = false;
         }
         else
         {
-            double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+            // Tap to set BPM
+            double now = juce::Time::getMillisecondCounterHiRes() / 1000.0;
             tapTimes.push_back (now);
-            if ((int) tapTimes.size() > 5)
-                tapTimes.erase (tapTimes.begin());
-            if ((int) tapTimes.size() >= 2)
+            if ((int)tapTimes.size() > 5) tapTimes.erase (tapTimes.begin());
+            if ((int)tapTimes.size() >= 2)
             {
                 double sum = 0.0;
-                for (int i = 1; i < (int) tapTimes.size(); ++i)
-                    sum += tapTimes[i] - tapTimes[i-1];
+                for (int i = 1; i < (int)tapTimes.size(); ++i)
+                    sum += tapTimes[i] - tapTimes[i - 1];
                 double avg = sum / (tapTimes.size() - 1);
                 bpm = juce::jlimit (40, 240, (int)(60.0 / avg));
             }
         }
+        repaint();
         return;
     }
 
-    // ── SET BPM button ─────────────────────────────────────────────────────
-    if (tapBpmBtnRect.contains (mx, my))
+    // ── Normal mode ────────────────────────────────────────────
+    if (hitTapBtn (pos))
     {
-        tapMode = true;
+        tapMode  = true;
+        isPaused = true;
         tapTimes.clear();
+        repaint();
+        return;
+    }
+
+    if (int opt = hitStepBtn (pos))
+    {
+        activeSteps = opt;
+        repaint();
+        return;
+    }
+
+    if (hitAddBtn (pos))
+    {
+        if (numRows >= MAX_ROWS) return;
+
+        // Launch the file chooser
+        chooser = std::make_unique<juce::FileChooser> ("Select a WAV or MP3...",
+                                                       juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                                       "*.wav;*.mp3");
+
+        auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+
+        chooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
         {
-            const juce::ScopedLock sl (fxLock);
-            fxParams.paused = true;
+            auto file = fc.getResult();
+            if (file.existsAsFile())
+                loadAudioFile (file);
+        });
+        
+        return;
+    }
+
+    int delRow = hitDelBtn (pos);
+    if (delRow >= 0)
+    {
+        confirmRow = delRow;
+        repaint();
+        return;
+    }
+
+    // Toggle step cell
+    int packed = hitStepCell (pos);
+    if (packed >= 0)
+    {
+        int r = packed >> 8;
+        int c = packed & 0xff;
+        if (r < MAX_ROWS && c < MAX_STEPS)
+        {
+            grid[r][c] = !grid[r][c];
+            repaint();
         }
         return;
     }
 
-    // ── Step-count buttons ─────────────────────────────────────────────────
-    int stepOpts[] = { 8, 16, 32 };
-    for (int i = 0; i < 3; ++i)
-        if (stepBtnRects[i].contains (mx, my)) { activeSteps = stepOpts[i]; return; }
+    // Reverb sliders
+    if (sliderSize.rect.contains (pos)) { dragTarget = DragTarget::ReverbSize; }
+    else if (sliderWet.rect.contains (pos)) { dragTarget = DragTarget::ReverbWet; }
 
-    // ── Add voice button ───────────────────────────────────────────────────
-    if (addVoiceBtnRect.contains (mx, my))
+    // Per-row volume sliders
+    for (int r = 0; r < numRows; ++r)
     {
-        auto chooser = std::make_shared<juce::FileChooser> (
-            "Select drum sample", juce::File::getSpecialLocation (juce::File::userHomeDirectory),
-            "*.wav;*.aiff;*.mp3");
-
-        chooser->launchAsync (juce::FileBrowserComponent::openMode |
-                              juce::FileBrowserComponent::canSelectFiles,
-            [this, chooser] (const juce::FileChooser& fc)
-            {
-                auto result = fc.getResult();
-                if (result.existsAsFile())
-                {
-                    loadVoice (result);
-                    juce::MessageManager::callAsync ([this] { resized(); repaint(); });
-                }
-            });
-        return;
-    }
-
-    // ── Delete buttons ─────────────────────────────────────────────────────
-    for (int i = 0; i < delBtnRects.size(); ++i)
-        if (delBtnRects[i].contains (mx, my)) { confirmRow = i; return; }
-
-    // ── Reverb SIZE slider ──────────────────────────────────────────────────
-    if (reverbSizeRect.contains (mx, my))
-    {
-        currentDrag = Drag::ReverbSize;
-        dragStartY  = my;
-        return;
-    }
-
-    // ── Reverb WET slider ──────────────────────────────────────────────────
-    if (reverbWetRect.contains (mx, my))
-    {
-        currentDrag = Drag::ReverbWet;
-        dragStartY  = my;
-        return;
-    }
-
-    // ── Per-row volume sliders ──────────────────────────────────────────────
-    for (int i = 0; i < volSliderRects.size(); ++i)
-    {
-        if (volSliderRects[i].contains (mx, my))
+        if (volSliders[r].rect.contains (pos))
         {
-            currentDrag = Drag::Volume;
-            dragRow     = i;
-            dragStartY  = my;
-            return;
+            dragTarget = DragTarget::VSlider;
+            dragVRow   = r;
+            break;
         }
     }
+}
 
-    // ── Sequencer step cells ───────────────────────────────────────────────
-    if (seqCellW > 0)
+void PulseFieldPage::mouseDrag (const juce::MouseEvent& e)
+{
+    auto pos = e.getPosition();
+
+    auto updateVSlider = [](VSlider& vs, int mouseY) {
+        float t = 1.0f - (float)(mouseY - vs.rect.getY()) / (float)vs.rect.getHeight();
+        vs.value = juce::jlimit (0.0f, 1.0f, t);
+    };
+    auto updateHSlider = [](HSlider& sl, int mouseY) {
+        // Vertical HSlider: bottom = min, top = max
+        float t = 1.0f - (float)(mouseY - sl.rect.getY()) / (float)sl.rect.getHeight();
+        float raw = sl.minV + t * (sl.maxV - sl.minV);
+        sl.value = juce::jlimit (sl.minV, sl.maxV, raw);
+    };
+
+    if (dragTarget == DragTarget::VSlider && dragVRow >= 0)
+        updateVSlider (volSliders[dragVRow], pos.y);
+    else if (dragTarget == DragTarget::ReverbSize)
+        updateHSlider (sliderSize, pos.y);
+    else if (dragTarget == DragTarget::ReverbWet)
+        updateHSlider (sliderWet, pos.y);
+
+    if (dragTarget != DragTarget::None) repaint();
+}
+
+void PulseFieldPage::mouseUp (const juce::MouseEvent&)
+{
+    dragTarget = DragTarget::None;
+    dragVRow   = -1;
+}
+
+void PulseFieldPage::loadAudioFile (juce::File file)
+{
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
+    if (reader != nullptr)
     {
-        int col = (mx - seqLeftX) / seqCellW;
-        int row = (my - seqTopY)  / seqRowH;
         const juce::ScopedLock sl (voiceLock);
-        int nRows = (int) voices.size();
-        if (row >= 0 && row < nRows && col >= 0 && col < activeSteps)
-        {
-            auto cell = juce::Rectangle<int> (seqLeftX + col * seqCellW + 2,
-                                               seqTopY  + row * seqRowH  + 5,
-                                               seqCellW - 4, seqRowH - 12);
-            if (cell.contains (mx, my) && col < (int) grid[row].size())
-                grid[row][col] = ! grid[row][col];
-        }
-    }
-}
+        Voice newVoice;
+        newVoice.name = file.getFileNameWithoutExtension();
+        newVoice.samples.resize ((int)reader->lengthInSamples);
+        
+        juce::AudioBuffer<float> temp (reader->numChannels, (int)reader->lengthInSamples);
+        reader->read (&temp, 0, (int)reader->lengthInSamples, 0, true, true);
+        
+        for (int i = 0; i < newVoice.samples.size(); ++i)
+            newVoice.samples[i] = temp.getSample (0, i);
 
-void PulsefieldPage::mouseDrag (const juce::MouseEvent& e)
-{
-    int my = e.y;
-
-    if (currentDrag == Drag::ReverbSize && reverbSizeRect.getHeight() > 0)
-    {
-        float norm = 1.0f - (float)(my - reverbSizeRect.getY()) / (float)reverbSizeRect.getHeight();
-        reverbSizeVal = juce::jlimit (0.5f, 3.0f, 0.5f + norm * (3.0f - 0.5f));
+        voices.push_back (std::move (newVoice));
+        numRows = (int)voices.size();
+        std::memset (grid[numRows - 1], 0, sizeof (grid[0]));
+        
+        juce::MessageManager::callAsync ([this] { resized(); repaint(); });
     }
-    else if (currentDrag == Drag::ReverbWet && reverbWetRect.getHeight() > 0)
-    {
-        float norm = 1.0f - (float)(my - reverbWetRect.getY()) / (float)reverbWetRect.getHeight();
-        reverbWetVal = juce::jlimit (0.0f, 1.0f, norm);
-    }
-    else if (currentDrag == Drag::Volume && dragRow >= 0
-             && dragRow < (int) rowVolumes.size()
-             && volSliderRects[dragRow].getHeight() > 0)
-    {
-        float norm = 1.0f - (float)(my - volSliderRects[dragRow].getY())
-                          / (float)volSliderRects[dragRow].getHeight();
-        rowVolumes[dragRow] = juce::jlimit (0.0f, 1.0f, norm);
-    }
-}
-
-void PulsefieldPage::mouseUp (const juce::MouseEvent&)
-{
-    currentDrag = Drag::None;
-    dragRow     = -1;
 }

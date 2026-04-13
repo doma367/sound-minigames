@@ -15,7 +15,7 @@ MainComponent::MainComponent()
     helpOverlay    = std::make_unique<HelpOverlay>    (*this);
     fleshSynthPage = std::make_unique<FleshSynthPage> (*this);
     dualcastPage   = std::make_unique<DualcastPage>   (*this);
-    pulsefieldPage = std::make_unique<PulsefieldPage> (*this);
+    pulsefieldPage = std::make_unique<PulseFieldPage> (*this);
 
     addAndMakeVisible (*landingPage);
     addChildComponent (*settingsPage);
@@ -26,17 +26,37 @@ MainComponent::MainComponent()
 
     landingPage->setBounds (getLocalBounds());
 
-    // Bind OSC port ONCE — never disconnect until app closes
-    if (sharedOSC.connect (9000))
+    // Force-clear ports 9000 and 9001 before binding.
+    // After a crash the previous process often holds the UDP port open.
+    // lsof finds any PID bound to these ports and kills it, then we retry
+    // the bind in a small loop so a momentary OS delay doesn't fail us.
     {
-        sharedOSC.addListener (this);
-        oscBound = true;
-        DBG ("[MainComponent] Shared OSC bound to port 9000");
+        juce::ChildProcess killer;
+        killer.start (juce::StringArray { "/bin/sh", "-c",
+            "lsof -tiUDP:9000 2>/dev/null | xargs kill -9 2>/dev/null; "
+            "lsof -tiUDP:9001 2>/dev/null | xargs kill -9 2>/dev/null; "
+            "pkill -f somatun_vision 2>/dev/null; true" });
+        killer.waitForProcessToFinish (600);
+        juce::Thread::sleep (150);
+        DBG ("[MainComponent] Port flush complete");
     }
-    else
+
+    // Bind OSC port ONCE — retry up to 5x in case the OS needs a moment
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        DBG ("[MainComponent] WARNING: Could not bind OSC port 9000");
+        if (sharedOSC.connect (9000))
+        {
+            sharedOSC.addListener (this);
+            oscBound = true;
+            DBG ("[MainComponent] Shared OSC bound to port 9000 (attempt "
+                 + juce::String (attempt + 1) + ")");
+            break;
+        }
+        juce::Thread::sleep (120);
     }
+
+    if (! oscBound)
+        DBG ("[MainComponent] WARNING: Could not bind OSC port 9000 after retries");
 }
 
 MainComponent::~MainComponent()
@@ -208,8 +228,17 @@ void MainComponent::launchVisionProcess()
     {
         DBG ("[MainComponent] Killing existing vision process before relaunch");
         visionProcess.kill();
-        juce::Thread::sleep (400);  // let OS release port 9001
     }
+
+    // Also kill any orphaned vision processes (e.g. from a previous crash)
+    {
+        juce::ChildProcess killOrphans;
+        killOrphans.start (juce::StringArray { "/bin/sh", "-c",
+            "pkill -9 -f somatun_vision 2>/dev/null; "
+            "lsof -tiTCP:9001 2>/dev/null | xargs kill -9 2>/dev/null; true" });
+        killOrphans.waitForProcessToFinish (500);
+    }
+    juce::Thread::sleep (300);  // let OS fully release port 9001
 
     juce::File appBundle      = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
     juce::File scriptInBundle = appBundle.getChildFile ("Contents/Resources/somatun_vision.py");
