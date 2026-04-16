@@ -1,272 +1,133 @@
 #pragma once
 #include <JuceHeader.h>
-#include <juce_osc/juce_osc.h>
 #include "SomatunLookAndFeel.h"
-
-// Re-use VideoReceiver / CameraView from FleshSynthPage.h
-// (they're header-only sub-components - just include the shared header)
-#include "FleshSynthPage.h"
 
 class MainComponent;
 
 // ============================================================
-//  Music-theory constants
+//  Dualcast  — Gesture-driven two-voice synthesiser
+//
+//  OSC port 9000:
+//    /hands  → hand landmark data → gesture state
+//  TCP port 9001:
+//    JPEG frames → camera preview
+//
+//  RIGHT hand → master volume  (raise = louder)
+//  LEFT  hand → pitch + trigger
+//      left  half → DRONE voice
+//      right half → LEAD  voice
+//      pinch + drag up/down → step through scale notes
+//      open hand (0.4 s)   → note ON
+//      fist      (0.3 s)   → note OFF
 // ============================================================
-namespace DualcastTheory
-{
-    // Scale definitions - semitone offsets from root (C)
-    struct Scale { const char* name; std::vector<int> semitones; };
 
-    inline const Scale SCALES[] =
+// ── Music theory constants ──────────────────────────────────
+static constexpr int DC_NUM_SCALES = 9;
+static constexpr int DC_NUM_SOUNDS = 4;
+
+// ── Hand landmark data (shared with PulseFieldPage format) ──
+struct DCHandLandmark { float x { 0.5f }; float y { 0.5f }; };
+
+struct DCHandFrame
+{
+    static constexpr int NUM_LANDMARKS = 21;
+    struct Hand
     {
-        { "Pentatonic",    { 0, 2, 4, 7, 9 } },
-        { "Major",         { 0, 2, 4, 5, 7, 9, 11 } },
-        { "Nat. Minor",    { 0, 2, 3, 5, 7, 8, 10 } },
-        { "Blues",         { 0, 3, 5, 6, 7, 10 } },
-        { "Dorian",        { 0, 2, 3, 5, 7, 9, 10 } },
-        { "Phrygian",      { 0, 1, 3, 5, 7, 8, 10 } },
-        { "Lydian",        { 0, 2, 4, 6, 7, 9, 11 } },
-        { "Mixolydian",    { 0, 2, 4, 5, 7, 9, 10 } },
-        { "Chromatic",     { 0,1,2,3,4,5,6,7,8,9,10,11 } },
+        bool          valid   { false };
+        bool          isRight { false };
+        DCHandLandmark lm[NUM_LANDMARKS] {};
     };
-    inline constexpr int NUM_SCALES = 9;
-
-    inline const char* SOUND_NAMES[] = { "Sine", "Organ", "Soft Pad", "Pluck" };
-    inline constexpr int NUM_SOUNDS = 4;
-
-    inline const char* NOTE_NAMES[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-
-    static constexpr double C2_HZ = 65.406;
-
-    inline double stepToFreq (int step, const std::vector<int>& scale, int octave)
-    {
-        int n    = (int) scale.size();
-        step     = juce::jlimit (0, n - 1, step);
-        int semi = scale[(size_t) step];
-        return C2_HZ * std::pow (2.0, (semi + octave * 12) / 12.0);
-    }
-
-    inline juce::String freqToNoteName (double freq)
-    {
-        if (freq <= 0.0) return "---";
-        int midi = (int) std::round (12.0 * std::log2 (freq / C2_HZ) + 24);
-        if (midi < 0 || midi > 127) return "---";
-        return juce::String (NOTE_NAMES[midi % 12]) + juce::String (midi / 12 - 1);
-    }
-}
-
-// ============================================================
-//  Karplus-Strong delay-line string model
-// ============================================================
-class KarplusStrongVoice
-{
-public:
-    void trigger (double freq, double sampleRate)
-    {
-        size = juce::jmax (1, (int)(sampleRate / freq));
-        if ((int)buf.size() != size)
-            buf.resize ((size_t) size);
-        for (auto& s : buf) s = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
-        pos    = 0;
-        active = true;
-    }
-
-    void release() { active = false; }
-
-    float tick()
-    {
-        if (!active || buf.empty()) return 0.0f;
-        float out  = buf[(size_t) pos];
-        int   nxt  = (pos + 1) % size;
-        buf[(size_t) pos] = 0.996f * 0.5f * (buf[(size_t) pos] + buf[(size_t) nxt]);
-        pos = nxt;
-        return out;
-    }
-
-private:
-    std::vector<float> buf;
-    int  pos    { 0 };
-    int  size   { 1 };
-    bool active { false };
+    Hand hands[2] {};
+    int  numHands { 0 };
 };
 
 // ============================================================
-//  Per-voice audio state - Drone and Lead
+//  Camera / video components  (reused pattern from PulseField)
 // ============================================================
-struct DcVoice
-{
-    // UI-controlled (written from message thread, read on audio thread under lock)
-    bool   on       { false };
-    double freq     { 130.81 };
-    int    soundIdx { 1 };   // 0=Sine 1=Organ 2=Pad 3=Pluck
+class DCCameraView;
 
-    // Audio-thread internal
-    double phase    { 0.0 };
-    double padGain  { 0.0 };
-    double envGain  { 0.0 };
-    bool   prevOn   { false };
-    KarplusStrongVoice ks;
-
-    // Generate `frames` samples of this voice at the given sampleRate.
-    // Returns a vector of floating-point samples in [-1, 1].
-    void generate (float* out, int frames, double sampleRate);
-};
-
-// ============================================================
-//  DualcastAudioEngine - two voices + master volume
-// ============================================================
-class DualcastAudioEngine : public juce::AudioIODeviceCallback
+class DCVideoReceiver : public juce::Thread
 {
 public:
-    DualcastAudioEngine();
-
-    // Thread-safe setters called from the UI thread
-    void setDroneOn    (bool v);
-    void setDroneFreq  (double f);
-    void setDroneSnd   (int i);
-    void setLeadOn     (bool v);
-    void setLeadFreq   (double f);
-    void setLeadSnd    (int i);
-    void setMasterVol  (double v);
-
-    // Snapshot of state for UI display (cheap, approximate - no lock needed)
-    double getDroneFreq() const  { return drone.freq; }
-    double getLeadFreq()  const  { return lead.freq;  }
-    bool   isDroneOn()    const  { return drone.on;   }
-    bool   isLeadOn()     const  { return lead.on;    }
-    double getMasterVol() const  { return masterVol;  }
-
-    // AudioIODeviceCallback
-    void audioDeviceIOCallbackWithContext (const float* const*, int,
-                                           float* const*, int, int,
-                                           const juce::AudioIODeviceCallbackContext&) override;
-    void audioDeviceAboutToStart (juce::AudioIODevice* dev) override
-    {
-        sampleRate = dev->getCurrentSampleRate();
-    }
-    void audioDeviceStopped() override {}
+    explicit DCVideoReceiver (DCCameraView& view);
+    ~DCVideoReceiver() override { stopReceiver(); }
+    void startReceiver();
+    void stopReceiver();
 
 private:
+    static bool readExact (juce::StreamingSocket& sock, void* buf, int numBytes);
+    void run() override;
+
+    DCCameraView& cameraView;
+    std::atomic<juce::StreamingSocket*> streamSocket { nullptr };
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DCVideoReceiver)
+};
+
+class DCCameraView : public juce::Component
+{
+public:
+    DCCameraView() = default;
+    void pushFrame (const juce::Image& img);
+    void paint (juce::Graphics& g) override;
+
+    // Called on the message thread after each new frame arrives
+    std::function<void()> onNewFrame;
+
+    // Pull the latest frame for external compositing
+    juce::Image getLatestFrame()
+    {
+        const juce::ScopedLock sl (lock);
+        return latest;
+    }
+
+private:
+    juce::Image           latest;
+    bool                  hasFrame { false };
     juce::CriticalSection lock;
-    DcVoice drone;
-    DcVoice lead;
-    double  masterVol  { 0.0 };
-    double  volGain    { 0.0 };   // smoothed
-    double  sampleRate { 44100.0 };
 };
 
-// ============================================================
-//  Per-voice UI + gesture state
-// ============================================================
-struct DcVoiceState
-{
-    int  scaleIdx  { 0 };
-    int  soundIdx  { 1 };
-    int  octave    { 2 };
-    int  step      { 0 };     // current scale step
-    bool stepInited{ false };
-
-    // Pinch step controller
-    bool  wasPinch   { false };
-    float anchorY    { 0.0f };
-
-    const std::vector<int>& scale() const
-    {
-        return DualcastTheory::SCALES[scaleIdx].semitones;
-    }
-    juce::String scaleName() const { return DualcastTheory::SCALES[scaleIdx].name; }
-    juce::String soundName() const { return DualcastTheory::SOUND_NAMES[soundIdx]; }
-
-    double currentFreq() const
-    {
-        return DualcastTheory::stepToFreq (step, scale(), octave);
-    }
-
-    // Returns new frequency after processing pinch drag
-    double updateStep (bool pinch, float hy)
-    {
-        static constexpr float ZONE = 0.055f;
-        int total = (int) scale().size();
-        if (!stepInited) { step = total / 2; anchorY = hy; stepInited = true; }
-
-        if (pinch)
-        {
-            if (!wasPinch)
-                anchorY = hy;
-            else
-            {
-                float delta = anchorY - hy;   // drag up = positive
-                int moved   = (int)(delta / ZONE);
-                if (moved != 0)
-                {
-                    step     = juce::jlimit (0, total - 1, step + moved);
-                    anchorY -= moved * ZONE;
-                }
-            }
-        }
-        wasPinch = pinch;
-        return currentFreq();
-    }
-
-    void resetStep() { stepInited = false; }
-};
-
-// ============================================================
-//  HoldTimer  - fires after a held condition for `threshold` seconds
-// ============================================================
-class DcHoldTimer
+class DCOverlayView : public juce::Component
 {
 public:
-    explicit DcHoldTimer (float threshold = 0.35f) : thresh (threshold) {}
-
-    // Call every UI tick; returns true once condition has been held for `thresh` s
-    bool update (bool condition, float dtSec)
-    {
-        if (condition)
-        {
-            held += dtSec;
-            if (held >= thresh) { held = thresh; return true; }
-        }
-        else
-        {
-            held = 0.0f;
-        }
-        return false;
-    }
-
-    void reset() { held = 0.0f; }
-
-private:
-    float thresh;
-    float held { 0.0f };
+    std::function<void(juce::Graphics&)> onPaint;
+    void paint (juce::Graphics& g) override { if (onPaint) onPaint (g); }
 };
 
 // ============================================================
-//  Smoothed EMA per named channel
+//  Per-voice state
 // ============================================================
-class DcEMA
+struct DCVoiceState
 {
-public:
-    explicit DcEMA (float alpha = 0.30f) : alpha (alpha) {}
+    int  scaleIdx  { 0 };   // index into SCALE_NAMES
+    int  soundIdx  { 1 };   // 0=Sine 1=Organ 2=SoftPad 3=Pluck
+    int  octave    { 2 };   // octave offset (0..6)
+    bool showScaleMenu { false };
+    bool showSoundMenu { false };
 
-    float operator() (int channel, float val)
-    {
-        if (channel >= (int) v.size())
-            v.resize ((size_t)(channel + 1), val);
-        v[(size_t) channel] = alpha * val + (1.0f - alpha) * v[(size_t) channel];
-        return v[(size_t) channel];
-    }
+    // Current step within scale (0..len-1)
+    int   step      { 0 };
+    float anchorY   { 0.5f };
+    bool  wasPinch  { false };
 
-private:
-    float alpha;
-    std::vector<float> v;
+    // Hold timers (seconds elapsed while condition true)
+    double openHoldStart { -1.0 };
+    double fistHoldStart { -1.0 };
+
+    // Smoothed palm position (EMA)
+    float emaX { 0.5f };
+    float emaY { 0.5f };
+    bool  emaInit { false };
+
+    // Whether this voice is currently sounding
+    bool noteOn { false };
 };
 
 // ============================================================
 //  DualcastPage
 // ============================================================
 class DualcastPage : public juce::Component,
-                     private juce::Timer
+                     private juce::Timer,
+                     private juce::AudioIODeviceCallback
 {
 public:
     explicit DualcastPage (MainComponent& mc);
@@ -275,121 +136,153 @@ public:
     void start();
     void stop();
 
-    // juce::Component
     void paint   (juce::Graphics&) override;
     void resized () override;
     void mouseDown (const juce::MouseEvent&) override;
-    void handlePoseMessage  (const juce::OSCMessage& m);
+
+    // Called by MainComponent's OSC router (message thread)
     void handleHandsMessage (const juce::OSCMessage& m);
 
 private:
-    // ---- 40 Hz UI tick ----
+    // ── Timer ──────────────────────────────────────────────────
     void timerCallback() override;
 
-    // ---- Drawing ----
-    void drawBackground    (juce::Graphics& g);
-    void drawDivider       (juce::Graphics& g);
-    void drawNoteGuidelines(juce::Graphics& g, const DcVoiceState& vs,
-                            int xLeft, int xRight, juce::Colour accent,
-                            bool voiceOn, float nowSec);
-    void drawHandGlow      (juce::Graphics& g, int px, int py,
-                            juce::Colour accent, bool on, bool pinch);
-    void drawVolumeBar     (juce::Graphics& g, float vol, int cx, int ytop);
-    void drawHUD           (juce::Graphics& g);
-    void drawVoiceControls (juce::Graphics& g, bool isDrone);
-    void drawZoneLabel     (juce::Graphics& g, bool isDrone);
+    // ── Audio ──────────────────────────────────────────────────
+    void audioDeviceIOCallbackWithContext (const float* const*, int,
+                                           float* const*, int, int,
+                                           const juce::AudioIODeviceCallbackContext&) override;
+    void audioDeviceAboutToStart (juce::AudioIODevice* dev) override;
+    void audioDeviceStopped() override {}
 
-    // ---- Button hit-testing ----
-    struct BtnRect { juce::Rectangle<int> r; };
-    BtnRect droneScaleBtn, droneSoundBtn;
-    BtnRect leadScaleBtn,  leadSoundBtn;
+    // ── Gesture extraction ─────────────────────────────────────
+    void processGesture (const DCHandFrame& hf);
 
-    enum class MenuState { None, DroneScale, DroneSound, LeadScale, LeadSound };
-    MenuState openMenu { MenuState::None };
+    // ── Drawing helpers ────────────────────────────────────────
+    void drawBackground     (juce::Graphics& g);
+    void drawToolbar        (juce::Graphics& g, juce::Rectangle<int> tb);
+    void drawZones          (juce::Graphics& g, juce::Rectangle<int> playArea);
+    void drawNoteGuidelines (juce::Graphics& g, juce::Rectangle<int> zone,
+                              const DCVoiceState& vs, bool isDrone);
+    void drawHandGlow       (juce::Graphics& g, float nx, float ny,
+                              juce::Colour accent, bool noteOn, bool pinch);
+    void drawVolumeBar      (juce::Graphics& g, float vol, float nx, float ny);
+    void drawHUD            (juce::Graphics& g, juce::Rectangle<int> hud);
+    void drawHandSkeleton   (juce::Graphics& g);
+    void drawDropdown       (juce::Graphics& g, juce::Rectangle<int> anchor,
+                              const juce::StringArray& items, int sel,
+                              juce::Colour accent, bool above);
+    void drawScaleBtn       (juce::Graphics& g, juce::Rectangle<int> r,
+                              const juce::String& label, bool active,
+                              juce::Colour accent);
+    void drawSoundBtn       (juce::Graphics& g, juce::Rectangle<int> r,
+                              const juce::String& label, bool active,
+                              juce::Colour accent);
 
-    void buildButtonRects();
-    void drawButtonWidget (juce::Graphics& g, const juce::String& label,
-                           juce::Rectangle<int> r, bool active, juce::Colour accent);
-    void drawDropdown (juce::Graphics& g, int count, int selected,
-                    juce::Rectangle<int> anchorBtn,
-                    juce::Colour accent, bool isScale);
+    // ── Hit-testing helpers ────────────────────────────────────
+    int  hitScaleBtn  (juce::Point<int> p) const;  // 0=drone 1=lead -1=none
+    int  hitSoundBtn  (juce::Point<int> p) const;
+    int  hitDropdown  (juce::Point<int> p, int voiceIdx,
+                       bool isScale) const;          // returns item index or -1
 
-    // ---- Layout ----
+    // ── Geometry (filled in resized) ───────────────────────────
     juce::Rectangle<int> cameraRect;
+    juce::Rectangle<int> toolbarRect;
+    juce::Rectangle<int> playRect;
     juce::Rectangle<int> hudRect;
 
-    // ---- Camera / video ----
-    CameraView    cameraView;
-    VideoReceiver videoReceiver { cameraView };
+    // Button rects
+    juce::Rectangle<int> droneScaleBtn;
+    juce::Rectangle<int> droneSoundBtn;
+    juce::Rectangle<int> leadScaleBtn;
+    juce::Rectangle<int> leadSoundBtn;
 
-    // Raw pose landmarks from /pose  (33 × 2)
-    static constexpr int kNumLm   = 33;
-    static constexpr int kNumLmF  = kNumLm * 2;
-    std::atomic<float> oscPose[kNumLmF] {};
+    // Dropdown item rects (filled when menu open)
+    juce::Array<juce::Rectangle<int>> droneDropRects;
+    juce::Array<juce::Rectangle<int>> leadDropRects;
 
-    // Raw hand data from /hands
-    // Layout: numHands(1 float), then per hand: label(0=Left/1=Right, 1 float),
-    //         21 × 2 floats for x/y landmarks
-    static constexpr int kMaxHands    = 2;
-    static constexpr int kHandLmCount = 21;
-    static constexpr int kHandFloats  = kMaxHands * (1 + kHandLmCount * 2) + 1;
-    std::atomic<float> oscHands[kHandFloats] {};
+    // ── Application state ──────────────────────────────────────
+    DCVoiceState droneState;
+    DCVoiceState leadState;
 
-    // ---- Parsed hand data (message thread only) ----
-    struct HandData
+    // Last known hand positions (normalised, for overlay)
+    struct HandPos { float x { 0.5f }; float y { 0.5f }; bool valid { false }; bool isRight { false }; bool pinch { false }; };
+    HandPos handPosLeft;
+    HandPos handPosRight;
+
+    // Animated time (updated each timer tick)
+    double animTime { 0.0 };
+
+    // ── OSC landing zone ───────────────────────────────────────
+    static constexpr int MAX_HANDS_FLOATS = 1 + 2 * (1 + 21 * 2);  // 87
+    std::atomic<float> oscHandsData[MAX_HANDS_FLOATS] {};
+
+    // ── Audio engine ───────────────────────────────────────────
+    struct AudioEngine
     {
-        bool  valid  { false };
-        bool  isLeft { false };
-        float palmX  { 0.0f };  // normalised
-        float palmY  { 0.0f };
-        float spread { 0.0f };  // avg tip-palm distance
-        bool  pinch  { false };
-    };
-    HandData hands[kMaxHands];
-    int      numHands { 0 };
+        double sampleRate { 44100.0 };
 
-    void parseHandsOSC();
+        // ── Drone voice ──────────────────────────────────────
+        double dronePhase     { 0.0 };
+        float  dronePadGain   { 0.0f };  // for SoftPad envelope
+        float  droneGain      { 0.0f };  // for Sine/Organ envelope
+        bool   dronePrevOn    { false };
 
-    // ---- Voice state ----
-    DcVoiceState droneState;
-    DcVoiceState leadState;
+        // Karplus-Strong for drone Pluck
+        std::vector<float> droneKsBuf;
+        int   droneKsPos  { 0 };
+        int   droneKsSize { 1 };
+        bool  droneKsActive { false };
 
-    // ---- Hold timers (open hand = note on, fist = note off) ----
-    DcHoldTimer droneOpenTimer { 0.40f };
-    DcHoldTimer droneFistTimer { 0.30f };
-    DcHoldTimer leadOpenTimer  { 0.40f };
-    DcHoldTimer leadFistTimer  { 0.30f };
+        // ── Lead voice ────────────────────────────────────────
+        double leadPhase     { 0.0 };
+        float  leadPadGain   { 0.0f };
+        float  leadGain      { 0.0f };
+        bool   leadPrevOn    { false };
 
-    // ---- EMA smoothers ----
-    DcEMA ema { 0.30f };
+        std::vector<float> leadKsBuf;
+        int   leadKsPos   { 0 };
+        int   leadKsSize  { 1 };
+        bool  leadKsActive { false };
 
-    // ---- Hand pixel positions for overlay (message thread) ----
-    struct HandPx { int x, y; bool valid; bool pinch; bool on; juce::Colour accent; };
-    HandPx handPx[kMaxHands] {};
+        // ── Volume envelope ───────────────────────────────────
+        float volGain { 0.0f };
 
-    // ---- Volume ----
-    float masterVol  { 0.0f };
-    float volSmooth  { 0.0f };
+        // ── Waveform ring buffer (oscilloscope display) ───────
+        static constexpr int WAVE_BUF = 2048;
+        float waveBuf[WAVE_BUF] {};
+        std::atomic<int> wavePtr { 0 };
 
-    // ---- Audio engine + device ----
-    DualcastAudioEngine audioEngine;
+        // ── Atomics (message thread → audio thread) ───────────
+        std::atomic<float> atomicMasterVol  { 0.0f };
+        std::atomic<float> atomicDroneFreq  { 130.81f };
+        std::atomic<float> atomicLeadFreq   { 261.63f };
+        std::atomic<bool>  atomicDroneOn    { false };
+        std::atomic<bool>  atomicLeadOn     { false };
+        std::atomic<int>   atomicDroneSound { 1 };
+        std::atomic<int>   atomicLeadSound  { 1 };
+    } eng;
+
+    // Waveform snapshot for display
+    std::vector<float> waveformSnap;
+
+    // ── Constants ──────────────────────────────────────────────
+    static constexpr float EMA_ALPHA     = 0.30f;
+    static constexpr float OPEN_HOLD_S   = 0.40;   // seconds open hand → note on
+    static constexpr float FIST_HOLD_S   = 0.30;   // seconds fist      → note off
+    static constexpr float STEP_ZONE     = 0.055f; // normalised Y distance per step
+    static constexpr float SPREAD_OPEN   = 0.20f;  // spread > this = open hand
+    static constexpr float SPREAD_FIST   = 0.10f;  // spread < this = fist
+
+    // ── JUCE infrastructure ────────────────────────────────────
     juce::AudioDeviceManager deviceManager;
+    SomatunLookAndFeel        laf;
+    juce::TextButton          backButton { "BACK" };
 
-    // ---- Look and feel / UI ----
-    SomatunLookAndFeel laf;
-    juce::TextButton   backButton { "BACK" };
+    DCCameraView   cameraView;
+    DCOverlayView  overlayView;
+    std::unique_ptr<DCVideoReceiver> videoReceiver;
 
     MainComponent& mainComponent;
-
-    // Colours
-    static const juce::Colour DC_BG;
-    static const juce::Colour DC_DRONE;    // blue
-    static const juce::Colour DC_LEAD;    // green
-    static const juce::Colour DC_DIM;
-    static const juce::Colour DC_TEXT;
-
-    static constexpr int TOP_Y_OFFSET = 65;   // below button bar
-    static constexpr int BOT_Y_OFFSET = 72;   // above HUD
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DualcastPage)
 };
