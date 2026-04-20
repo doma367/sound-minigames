@@ -545,28 +545,31 @@ void DualcastPage::audioDeviceIOCallbackWithContext (
 
     // ── Generate a voice block ────────────────────────────────
     auto generateVoice = [&](bool on, float freq, int soundIdx,
-                              double& phase,
-                              float& gain, float& padGain,
-                              bool& prevOn,
-                              std::vector<float>& ksBuf, int& ksPos,
-                              int& ksSize, bool& ksActive) -> std::vector<float>
+                          double& phase,
+                          float& gain, float& padGain,
+                          bool& prevOn,
+                          std::vector<float>& ksBuf, int& ksPos,
+                          int& ksSize, bool& ksActive,
+                          float& lastKsFreq) -> std::vector<float>
     {
         std::vector<float> out (numSamples, 0.0f);
         float tgt = on ? 1.0f : 0.0f;
 
         if (soundIdx == 3)   // ── Pluck (Karplus-Strong) ──
         {
-            // Trigger on note-on edge
-            if (on && ! prevOn)
+            // Trigger on note-on edge OR frequency change while note is held
+            bool freqChanged = (freq != lastKsFreq);
+            if (on && (!prevOn || freqChanged))
             {
-                ksSize = std::max (1, (int)(sr / std::max (1.0f, freq)));
-                ksBuf.assign (ksSize, 0.0f);
+                ksSize = std::max(1, (int)(sr / std::max(1.0f, freq)));
+                ksBuf.assign(ksSize, 0.0f);
                 juce::Random rng;
                 for (auto& s : ksBuf) s = rng.nextFloat() * 2.0f - 1.0f;
-                ksPos    = 0;
-                ksActive = true;
+                ksPos      = 0;
+                ksActive   = true;
+                lastKsFreq = freq;
             }
-            if (! on && prevOn) ksActive = false;
+            if (!on && prevOn) { ksActive = false; lastKsFreq = 0.0f; }
             prevOn = on;
 
             if (ksActive && ksSize > 0)
@@ -624,15 +627,17 @@ void DualcastPage::audioDeviceIOCallbackWithContext (
         return out;
     };
 
-    std::vector<float> droneSig = generateVoice (
-        droneOn, droneF, droneS,
-        eng.dronePhase, eng.droneGain, eng.dronePadGain, eng.dronePrevOn,
-        eng.droneKsBuf, eng.droneKsPos, eng.droneKsSize, eng.droneKsActive);
+    std::vector<float> droneSig = generateVoice(
+    droneOn, droneF, droneS,
+    eng.dronePhase, eng.droneGain, eng.dronePadGain, eng.dronePrevOn,
+    eng.droneKsBuf, eng.droneKsPos, eng.droneKsSize, eng.droneKsActive,
+    eng.droneLastKsFreq);
 
-    std::vector<float> leadSig  = generateVoice (
-        leadOn, leadF, leadS,
-        eng.leadPhase, eng.leadGain, eng.leadPadGain, eng.leadPrevOn,
-        eng.leadKsBuf, eng.leadKsPos, eng.leadKsSize, eng.leadKsActive);
+    std::vector<float> leadSig = generateVoice(
+    leadOn, leadF, leadS,
+    eng.leadPhase, eng.leadGain, eng.leadPadGain, eng.leadPrevOn,
+    eng.leadKsBuf, eng.leadKsPos, eng.leadKsSize, eng.leadKsActive,
+    eng.leadLastKsFreq);
 
     // ── Volume envelope (EMA, k=0.006) ────────────────────────
     std::vector<float> mixed (numSamples);

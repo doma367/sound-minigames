@@ -232,6 +232,7 @@ private:
         int   droneKsPos  { 0 };
         int   droneKsSize { 1 };
         bool  droneKsActive { false };
+        float droneLastKsFreq { 0.0f };
 
         // ── Lead voice ────────────────────────────────────────
         double leadPhase     { 0.0 };
@@ -243,6 +244,7 @@ private:
         int   leadKsPos   { 0 };
         int   leadKsSize  { 1 };
         bool  leadKsActive { false };
+        float leadLastKsFreq  { 0.0f };
 
         // ── Volume envelope ───────────────────────────────────
         float volGain { 0.0f };
