@@ -82,6 +82,8 @@ public:
     void mouseExit (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
 
+    void setOverlayDim (bool dimmed);
+
 private:
     juce::Image logoImage;
     juce::Image iconImage;
@@ -92,6 +94,10 @@ private:
     const float BOOT_LOGO_OUT = 6.0f;
     const float BOOT_DELAY_2  = 7.0f;
     const float BOOT_UI_IN    = 9.0f;
+
+    // Overlay dim animation
+    float overlayDimAlpha  { 0.0f };
+    float overlayDimTarget { 0.0f };
 
     void timerCallback () override;
     void initParticles ();

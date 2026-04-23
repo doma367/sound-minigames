@@ -88,6 +88,15 @@ void LandingPage::timerCallback()
         exitButton.setAlpha(uiAlpha);
     }
 
+    // Animate overlay dim
+    if (overlayDimAlpha != overlayDimTarget)
+    {
+        float speed = 0.18f;  // higher = faster fade
+        overlayDimAlpha += (overlayDimTarget - overlayDimAlpha) * speed;
+        if (std::abs (overlayDimAlpha - overlayDimTarget) < 0.005f)
+            overlayDimAlpha = overlayDimTarget;
+    }
+
     // Particles
     for (auto& p : particles)
     {
@@ -135,6 +144,11 @@ void LandingPage::timerCallback()
     }
 
     repaint();
+}
+
+void LandingPage::setOverlayDim (bool dimmed)
+{
+    overlayDimTarget = dimmed ? 1.0f : 0.0f;
 }
 
 // ============================================================
@@ -212,6 +226,19 @@ void LandingPage::paint(juce::Graphics& g)
     g.setColour(TEXT_DIM.withAlpha(0.3f));
     g.setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
     g.drawText("v0.1.0-alpha", 32, h - 30, 100, 20, juce::Justification::centredLeft);
+
+    // Overlay dim (settings / help open)
+    if (overlayDimAlpha > 0.001f)
+    {
+        // Dark frosted layer
+        g.setColour (juce::Colour (0xff050505).withAlpha (overlayDimAlpha * 0.72f));
+        g.fillAll();
+
+        // Subtle noise/scanline texture on top of the dim
+        g.setColour (juce::Colour (0xffff3333).withAlpha (overlayDimAlpha * 0.03f));
+        for (int y = 0; y < getHeight(); y += 3)
+            g.drawHorizontalLine (y, 0.0f, (float) getWidth());
+    }
 
     g.endTransparencyLayer();
 }
@@ -347,19 +374,90 @@ void LandingPage::drawGameCard(juce::Graphics& g, juce::Rectangle<int> bounds,
 {
     CardWeb& web = cardWebs[cardIndex];
     bool     hov = (hoveredCard == cardIndex);
+    float    hi  = web.hoverIntensity;
 
-    // Web fills the entire card — clipped to bounds
+    // ── Background ───────────────────────────────────────────
+    g.setColour (juce::Colour (0xff0a0a0a));
+    g.fillRect  (bounds);
+
+    // ── Web fills the entire card — clipped to bounds ────────
     {
-        juce::Graphics::ScopedSaveState ss(g);
-        g.reduceClipRegion(bounds);
-        drawCardWeb(g, bounds, web);
+        juce::Graphics::ScopedSaveState ss (g);
+        g.reduceClipRegion (bounds);
+        drawCardWeb (g, bounds, web);
     }
 
-    // Centered title over the web
-    float hi = web.hoverIntensity;
-    g.setColour(hov ? ACCENT : TEXT_PRI.withAlpha(0.75f + hi * 0.25f));
-    g.setFont(juce::Font(juce::FontOptions().withHeight(15.0f)));
-    g.drawText(name, bounds, juce::Justification::centred);
+    // ── Border ───────────────────────────────────────────────
+    float borderAlpha = 0.25f + hi * 0.65f;
+    g.setColour (ACCENT.withAlpha (borderAlpha));
+    g.drawRect  (bounds.toFloat(), 1.0f);
+
+    // ── Top glow line ────────────────────────────────────────
+    juce::ColourGradient topGrad (
+        juce::Colours::transparentBlack, (float) bounds.getX(),    (float) bounds.getY(),
+        juce::Colours::transparentBlack, (float) bounds.getRight(), (float) bounds.getY(), false);
+    topGrad.addColour (0.2, ACCENT.withAlpha (0.2f + hi * 0.4f));
+    topGrad.addColour (0.5, ACCENT.withAlpha (0.5f + hi * 0.5f));
+    topGrad.addColour (0.8, ACCENT.withAlpha (0.2f + hi * 0.4f));
+    g.setGradientFill (topGrad);
+    g.fillRect ((float) bounds.getX(), (float) bounds.getY(),
+                (float) bounds.getWidth(), 1.5f);
+
+    // ── Corner brackets ──────────────────────────────────────
+    float bracketAlpha = 0.4f + hi * 0.6f;
+    float bracketLen   = 12.0f;
+    g.setColour (ACCENT.withAlpha (bracketAlpha));
+    // TL
+    g.drawLine ((float) bounds.getX(), (float) bounds.getY(),
+                (float) bounds.getX() + bracketLen, (float) bounds.getY(), 1.5f);
+    g.drawLine ((float) bounds.getX(), (float) bounds.getY(),
+                (float) bounds.getX(), (float) bounds.getY() + bracketLen, 1.5f);
+    // TR
+    g.drawLine ((float) bounds.getRight() - bracketLen, (float) bounds.getY(),
+                (float) bounds.getRight(), (float) bounds.getY(), 1.5f);
+    g.drawLine ((float) bounds.getRight(), (float) bounds.getY(),
+                (float) bounds.getRight(), (float) bounds.getY() + bracketLen, 1.5f);
+    // BL
+    g.drawLine ((float) bounds.getX(), (float) bounds.getBottom(),
+                (float) bounds.getX() + bracketLen, (float) bounds.getBottom(), 1.5f);
+    g.drawLine ((float) bounds.getX(), (float) bounds.getBottom() - bracketLen,
+                (float) bounds.getX(), (float) bounds.getBottom(), 1.5f);
+    // BR
+    g.drawLine ((float) bounds.getRight() - bracketLen, (float) bounds.getBottom(),
+                (float) bounds.getRight(), (float) bounds.getBottom(), 1.5f);
+    g.drawLine ((float) bounds.getRight(), (float) bounds.getBottom() - bracketLen,
+                (float) bounds.getRight(), (float) bounds.getBottom(), 1.5f);
+
+    // ── Index number (top-left, small) ───────────────────────
+    g.setColour (ACCENT.withAlpha (0.3f + hi * 0.4f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  ("0" + juce::String (cardIndex + 1),
+                 bounds.getX() + 10, bounds.getY() + 8,
+                 30, 12, juce::Justification::centredLeft);
+
+    // ── Mode label — bottom left, not centered ────────────────
+    // Prefix tag
+    g.setColour (ACCENT.withAlpha (0.5f + hi * 0.5f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  ("//", bounds.getX() + 10, bounds.getBottom() - 38,
+                 20, 14, juce::Justification::centredLeft);
+
+    // Main name
+    g.setColour (hov ? ACCENT : TEXT_PRI.withAlpha (0.6f + hi * 0.4f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (13.0f)));
+    g.drawText  (name, bounds.getX() + 24, bounds.getBottom() - 38,
+                 bounds.getWidth() - 34, 14, juce::Justification::centredLeft);
+
+    // Subtle description line
+    static const char* descs[3] = {
+        "body  >>  waveform",
+        "gesture  >>  rhythm",
+        "hands  >>  dual voice"
+    };
+    g.setColour (TEXT_DIM.withAlpha (0.35f + hi * 0.35f));
+    g.setFont   (juce::Font (juce::FontOptions().withHeight (9.0f)));
+    g.drawText  (descs[cardIndex], bounds.getX() + 10, bounds.getBottom() - 22,
+                 bounds.getWidth() - 20, 12, juce::Justification::centredLeft);
 }
 
 // ============================================================
