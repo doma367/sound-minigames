@@ -23,6 +23,7 @@ Thumbs.db
 Builds/
 build/
 cmake-build-*/
+JuceLibraryCode/
 
 # binaries
 *.app
