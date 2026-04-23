@@ -55,7 +55,8 @@
   <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER="1" JUCE_USE_CAMERA="1"/>
   <EXPORTFORMATS>
     <XCODE_MAC targetFolder="Builds/MacOSX" cameraPermissionNeeded="1" smallIcon="XcQI2H"
-               bigIcon="vVcre0" customPList="This app requires camera access for body tracking">
+               bigIcon="vVcre0" customPList="This app requires camera access for body tracking"
+               customXcodeResourceFolders="somatun_vision.py">
       <CONFIGURATIONS>
         <CONFIGURATION isDebug="1" name="Debug" targetName="somatun_juce"/>
         <CONFIGURATION isDebug="0" name="Release" targetName="somatun_juce"/>

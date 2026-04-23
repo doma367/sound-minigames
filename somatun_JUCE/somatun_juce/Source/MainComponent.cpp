@@ -223,14 +223,12 @@ void MainComponent::launchMode (int cardIndex)
 
 void MainComponent::launchVisionProcess()
 {
-    // Always kill and restart — ensures clean Python process each time
     if (visionProcess.isRunning())
     {
         DBG ("[MainComponent] Killing existing vision process before relaunch");
         visionProcess.kill();
     }
 
-    // Also kill any orphaned vision processes (e.g. from a previous crash)
     {
         juce::ChildProcess killOrphans;
         killOrphans.start (juce::StringArray { "/bin/sh", "-c",
@@ -238,42 +236,80 @@ void MainComponent::launchVisionProcess()
             "lsof -tiTCP:9001 2>/dev/null | xargs kill -9 2>/dev/null; true" });
         killOrphans.waitForProcessToFinish (500);
     }
-    juce::Thread::sleep (300);  // let OS fully release port 9001
+    juce::Thread::sleep (300);
 
-    juce::File appBundle      = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
-    juce::File scriptInBundle = appBundle.getChildFile ("Contents/Resources/somatun_vision.py");
+    // ── Locate somatun_vision.py ───────────────────────────────────────
+    juce::File scriptToRun;
 
-    DBG ("App bundle path: " + appBundle.getFullPathName());
-    DBG ("Looking for vision script in bundle at: " + scriptInBundle.getFullPathName());
+    // 1. Bundled inside the .app (production)
+    juce::File appBundle     = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
+    juce::File bundledScript = appBundle.getChildFile ("Contents/Resources/somatun_vision.py");
 
-    juce::File scriptToRun = scriptInBundle;
-
-    if (! scriptInBundle.existsAsFile())
+    if (bundledScript.existsAsFile())
     {
-        juce::File scriptInSource ("/Users/doma367/sound-minigames/somatun_JUCE/somatun_juce/somatun_vision.py");
-        DBG ("Bundle script not found. Checking source path: " + scriptInSource.getFullPathName());
+        scriptToRun = bundledScript;
+        DBG ("[Vision] Using bundled script: " + scriptToRun.getFullPathName());
+    }
+    else
+    {
+        // 2. Walk up from the executable to find the project root (dev builds)
+        juce::File sourceDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                                   .getParentDirectory()   // Debug/ or Release/
+                                   .getParentDirectory()   // build/
+                                   .getParentDirectory()   // MacOSX/
+                                   .getParentDirectory()   // Builds/
+                                   .getParentDirectory();  // somatun_juce/ (project root)
 
-        if (scriptInSource.existsAsFile())
+        juce::File devScript = sourceDir.getChildFile ("somatun_vision.py");
+
+        if (devScript.existsAsFile())
         {
-            scriptToRun = scriptInSource;
-            DBG ("Using source-tree vision script: " + scriptToRun.getFullPathName());
+            scriptToRun = devScript;
+            DBG ("[Vision] Using dev script: " + scriptToRun.getFullPathName());
         }
         else
         {
-            DBG ("[ERROR] somatun_vision.py not found.");
+            DBG ("[ERROR] somatun_vision.py not found in bundle or project root.");
+            juce::AlertWindow::showMessageBoxAsync (
+                juce::AlertWindow::WarningIcon,
+                "Vision script not found",
+                "Could not locate somatun_vision.py.\n\n"
+                "Please reinstall Somatun.");
             return;
         }
     }
 
-    juce::String    pythonPath = "/Users/doma367/sound-minigames/.venv/bin/python";
-    juce::StringArray cmd;
-    cmd.add (pythonPath);
-    cmd.add (scriptToRun.getFullPathName());
+    // ── Locate python3 ────────────────────────────────────────────────
+    juce::StringArray pythonCandidates {
+        "/usr/local/bin/python3",      // Intel Homebrew — confirmed working
+        "/opt/homebrew/bin/python3",   // Apple Silicon Homebrew
+        "/usr/bin/python3"             // system fallback
+    };
 
-    DBG ("Launching vision helper: " + cmd.joinIntoString (" "));
+    juce::String pythonPath;
+    for (auto& candidate : pythonCandidates)
+        if (juce::File (candidate).existsAsFile())
+            { pythonPath = candidate; break; }
+
+    if (pythonPath.isEmpty())
+    {
+        DBG ("[ERROR] python3 not found.");
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            "Python not found",
+            "Somatun requires Python 3 with mediapipe installed.\n\n"
+            "Please install Python 3.11 from python.org, then run:\n"
+            "pip3 install mediapipe opencv-python pythonosc numpy");
+        return;
+    }
+
+    DBG ("[Vision] Using Python: " + pythonPath);
+
+    juce::StringArray cmd { pythonPath, scriptToRun.getFullPathName() };
+    DBG ("[Vision] Launching: " + cmd.joinIntoString (" "));
 
     if (visionProcess.start (cmd))
-        DBG ("Vision helper launched successfully");
+        DBG ("[Vision] Process launched successfully");
     else
-        DBG ("[ERROR] ChildProcess::start failed.");
+        DBG ("[ERROR] ChildProcess::start failed");
 }
