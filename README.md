@@ -12,13 +12,13 @@ Built with JUCE (C++) and MediaPipe (Python).
 ## Modes
 
 ### Fleshsynth
-A body-controlled wavetable synthesizer. Six tracked body joints — your wrists, 
-elbows, and shoulders — form a polyline that is resampled into a live waveform 
+A body-controlled wavetable synthesizer. Six tracked body joints - your wrists, 
+elbows, and shoulders - form a polyline that is resampled into a live waveform 
 buffer. Move to sculpt sound. Head tilt controls pitch via vibrato.
 
 ### Pulsefield
 A gesture-controlled step sequencer with a real-time effects chain. Program beats 
-on a grid, then warp them with your hands — right hand controls a low-pass filter 
+on a grid, then warp them with your hands - right hand controls a low-pass filter 
 and bit-crusher, left hand controls delay time and feedback. Ships with kick, snare, 
 and hi-hat voices. Load your own samples in WAV, AIFF, or MP3.
 
@@ -90,10 +90,10 @@ On first launch, macOS will ask for camera and microphone permission. Grant both
 
 Somatun uses a hybrid architecture:
 
-- **Python process** — captures webcam frames, runs MediaPipe pose and hand 
+- **Python process** - captures webcam frames, runs MediaPipe pose and hand 
   tracking, sends normalized landmark data over OSC (UDP port 9000) and JPEG 
   frames over TCP (port 9001)
-- **JUCE application** — receives OSC data, runs the audio engine, renders the UI
+- **JUCE application** - receives OSC data, runs the audio engine, renders the UI
 
 The Python process is launched automatically by the app at startup and terminated 
 when you return to the landing page.
@@ -102,9 +102,9 @@ when you return to the landing page.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-*Domokos Márk — Apáczai Csere János High School, Cluj-Napoca, 2026*  
+*Domokos Márk - Apáczai Csere János High School, Cluj-Napoca, 2026*  
 *Dissertation project, Mathematics-Informatics class*
