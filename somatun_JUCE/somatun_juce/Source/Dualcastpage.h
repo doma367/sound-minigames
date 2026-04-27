@@ -109,15 +109,6 @@ struct DCVoiceState
     float anchorY   { 0.5f };
     bool  wasPinch  { false };
 
-    // Hold timers (seconds elapsed while condition true)
-    double openHoldStart { -1.0 };
-    double fistHoldStart { -1.0 };
-
-    // Smoothed palm position (EMA)
-    float emaX { 0.5f };
-    float emaY { 0.5f };
-    bool  emaInit { false };
-
     // Whether this voice is currently sounding
     bool noteOn { false };
 };
@@ -136,9 +127,10 @@ public:
     void start();
     void stop();
 
-    void paint   (juce::Graphics&) override;
-    void resized () override;
-    void mouseDown (const juce::MouseEvent&) override;
+    void paint      (juce::Graphics&) override;
+    void resized    () override;
+    void mouseDown  (const juce::MouseEvent&) override;
+    bool keyPressed (const juce::KeyPress&)   override;
 
     // Called by MainComponent's OSC router (message thread)
     void handleHandsMessage (const juce::OSCMessage& m);
@@ -205,7 +197,27 @@ private:
     DCVoiceState leadState;
 
     // Last known hand positions (normalised, for overlay)
-    struct HandPos { float x { 0.5f }; float y { 0.5f }; bool valid { false }; bool isRight { false }; bool pinch { false }; };
+    struct HandPos
+    {
+        // Smoothed position — used for voice/volume logic (stable)
+        float  x { 0.5f };
+        float  y { 0.5f };
+        // Raw position — used for circle drawing (responsive, no lag)
+        float  rawX { 0.5f };
+        float  rawY { 0.5f };
+        bool   valid   { false };
+        bool   isRight { false };
+        bool   pinch   { false };
+
+        // Debounced gesture state
+        // We classify spread into three zones: OPEN / NEUTRAL / FIST
+        // and require N consecutive frames in a zone before firing,
+        // so a brief dip through NEUTRAL doesn't cancel the gesture.
+        enum class GestureZone { Open, Neutral, Fist };
+        GestureZone currentZone  { GestureZone::Neutral };
+        GestureZone confirmedZone{ GestureZone::Neutral };
+        int         zoneFrames   { 0 };   // consecutive frames in currentZone
+    };
     HandPos handPosLeft;
     HandPos handPosRight;
 
@@ -269,11 +281,9 @@ private:
 
     // ── Constants ──────────────────────────────────────────────
     static constexpr float EMA_ALPHA     = 0.30f;
-    static constexpr float OPEN_HOLD_S   = 0.40;   // seconds open hand → note on
-    static constexpr float FIST_HOLD_S   = 0.30;   // seconds fist      → note off
     static constexpr float STEP_ZONE     = 0.055f; // normalised Y distance per step
-    static constexpr float SPREAD_OPEN   = 0.20f;  // spread > this = open hand
-    static constexpr float SPREAD_FIST   = 0.10f;  // spread < this = fist
+    static constexpr float SPREAD_OPEN   = 0.16f;  // spread > this = open hand
+    static constexpr float SPREAD_FIST   = 0.12f;  // spread < this = fist
 
     // ── JUCE infrastructure ────────────────────────────────────
     juce::AudioDeviceManager deviceManager;

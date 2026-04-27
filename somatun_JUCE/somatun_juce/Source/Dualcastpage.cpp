@@ -226,6 +226,8 @@ DualcastPage::DualcastPage (MainComponent& mc)
         mainComponent.showLanding();
     };
     addAndMakeVisible (backButton);
+
+    setWantsKeyboardFocus (true);
 }
 
 DualcastPage::~DualcastPage()
@@ -304,7 +306,10 @@ static bool isPinch (const DCHandLandmark lm[])
 // ============================================================
 void DualcastPage::processGesture (const DCHandFrame& hf)
 {
-    const double now = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+    // Number of consecutive frames a gesture zone must be stable before
+    // firing.  At 40 Hz, 3 frames = 75 ms — fast enough to feel instant,
+    // long enough to ignore a flicker through NEUTRAL.
+    static constexpr int DEBOUNCE_FRAMES = 3;
 
     // Reset per-frame visibility
     handPosLeft.valid  = false;
@@ -315,13 +320,8 @@ void DualcastPage::processGesture (const DCHandFrame& hf)
         const auto& h = hf.hands[hi];
         if (! h.valid) continue;
 
-        // EMA-smoothed palm coords (gestsamp uses EMA(alpha=0.30) per hand)
         float rawX = h.lm[9].x;
         float rawY = h.lm[9].y;
-
-        // We identify which voice state owns this hand, but also need
-        // a per-hand EMA.  Since we have at most one left and one right
-        // hand, we can use the handPosLeft/Right structs for tracking.
 
         float pinchDist = std::hypot (h.lm[4].x - h.lm[8].x, h.lm[4].y - h.lm[8].y);
         bool  pinch     = pinchDist < DC_PINCH_THRESH;
@@ -330,24 +330,21 @@ void DualcastPage::processGesture (const DCHandFrame& hf)
         // ── RIGHT → master volume ─────────────────────────────
         if (h.isRight)
         {
-            // Smooth via the struct we stored last frame
             float prevX = handPosRight.valid ? handPosRight.x : rawX;
             float prevY = handPosRight.valid ? handPosRight.y : rawY;
-            float ex    = EMA_ALPHA * rawX + (1.0f - EMA_ALPHA) * prevX;
-            float ey    = EMA_ALPHA * rawY + (1.0f - EMA_ALPHA) * prevY;
 
-            handPosRight.x       = ex;
-            handPosRight.y       = ey;
+            handPosRight.x       = EMA_ALPHA * rawX + (1.0f - EMA_ALPHA) * prevX;
+            handPosRight.y       = EMA_ALPHA * rawY + (1.0f - EMA_ALPHA) * prevY;
+            handPosRight.rawX    = rawX;
+            handPosRight.rawY    = rawY;
             handPosRight.valid   = true;
             handPosRight.isRight = true;
             handPosRight.pinch   = pinch;
 
-            // vol = clip(1.15 - ey * 1.3, 0, 1)
-            float vol = juce::jlimit (0.0f, 1.0f, 1.15f - ey * 1.3f);
-            // EMA on the volume itself (key "vol" in python, alpha=0.30)
+            float vol     = juce::jlimit (0.0f, 1.0f, 1.15f - handPosRight.y * 1.3f);
             float prevVol = eng.atomicMasterVol.load (std::memory_order_relaxed);
-            float smoothVol = EMA_ALPHA * vol + (1.0f - EMA_ALPHA) * prevVol;
-            eng.atomicMasterVol.store (smoothVol, std::memory_order_relaxed);
+            eng.atomicMasterVol.store (EMA_ALPHA * vol + (1.0f - EMA_ALPHA) * prevVol,
+                                       std::memory_order_relaxed);
         }
 
         // ── LEFT → pitch + trigger ────────────────────────────
@@ -355,54 +352,64 @@ void DualcastPage::processGesture (const DCHandFrame& hf)
         {
             float prevX = handPosLeft.valid ? handPosLeft.x : rawX;
             float prevY = handPosLeft.valid ? handPosLeft.y : rawY;
-            float ex    = EMA_ALPHA * rawX + (1.0f - EMA_ALPHA) * prevX;
-            float ey    = EMA_ALPHA * rawY + (1.0f - EMA_ALPHA) * prevY;
 
-            handPosLeft.x       = ex;
-            handPosLeft.y       = ey;
+            handPosLeft.x       = EMA_ALPHA * rawX + (1.0f - EMA_ALPHA) * prevX;
+            handPosLeft.y       = EMA_ALPHA * rawY + (1.0f - EMA_ALPHA) * prevY;
+            handPosLeft.rawX    = rawX;   // unsmoothed — used for circle drawing
+            handPosLeft.rawY    = rawY;
             handPosLeft.valid   = true;
             handPosLeft.isRight = false;
             handPosLeft.pinch   = pinch;
 
-            // Which half? left half → drone, right half → lead
-            bool          isDrone = ex < 0.5f;
-            DCVoiceState& vs      = isDrone ? droneState : leadState;
+            // Voice assignment: always follow physical position.
+            // The old hysteresis (lock to whichever voice is ON) caused
+            // a fist in one zone to silence the voice in the other zone.
+            // Instead we just use the raw smoothed x position — each zone
+            // is independently responsible for its own note state.
+            bool isDrone = handPosLeft.x < 0.5f;
+            DCVoiceState& vs = isDrone ? droneState : leadState;
 
-            // ── Hold timer: open hand → note ON ─────────────
-            if (spread > SPREAD_OPEN)
+            // ── Debounced gesture classifier ──────────────────
+            // Classify the current spread into a zone.
+            using GZ = HandPos::GestureZone;
+            GZ newZone = (spread > SPREAD_OPEN) ? GZ::Open
+                       : (spread < SPREAD_FIST) ? GZ::Fist
+                       :                          GZ::Neutral;
+
+            if (newZone == handPosLeft.currentZone)
             {
-                if (vs.openHoldStart < 0.0)  vs.openHoldStart = now;
-                if ((now - vs.openHoldStart) >= OPEN_HOLD_S)
-                {
-                    vs.noteOn = true;
-                    if (isDrone) eng.atomicDroneOn.store (true, std::memory_order_relaxed);
-                    else         eng.atomicLeadOn .store (true, std::memory_order_relaxed);
-                }
+                handPosLeft.zoneFrames++;
             }
             else
             {
-                vs.openHoldStart = -1.0;
+                handPosLeft.currentZone = newZone;
+                handPosLeft.zoneFrames  = 1;
             }
 
-            // ── Hold timer: fist → note OFF ──────────────────
-            if (spread < SPREAD_FIST)
+            // Fire on the frame we reach the debounce threshold.
+            // Using == (not >=) means we fire exactly once per transition,
+            // not every frame while held — cleaner and avoids re-triggering.
+            if (handPosLeft.zoneFrames == DEBOUNCE_FRAMES)
             {
-                if (vs.fistHoldStart < 0.0)  vs.fistHoldStart = now;
-                if ((now - vs.fistHoldStart) >= FIST_HOLD_S)
+                handPosLeft.confirmedZone = newZone;
+
+                if (newZone == GZ::Open && ! vs.noteOn)
+                {
+                    vs.noteOn = true;
+                    if (isDrone) eng.atomicDroneOn.store (true,  std::memory_order_relaxed);
+                    else         eng.atomicLeadOn .store (true,  std::memory_order_relaxed);
+                }
+                else if (newZone == GZ::Fist && vs.noteOn)
                 {
                     vs.noteOn = false;
                     if (isDrone) eng.atomicDroneOn.store (false, std::memory_order_relaxed);
                     else         eng.atomicLeadOn .store (false, std::memory_order_relaxed);
                 }
             }
-            else
-            {
-                vs.fistHoldStart = -1.0;
-            }
 
             // ── Step controller: pinch + drag ─────────────────
-            // Mirrors StepController.update() from gestsamp.py
-            int scaleLen = DCMusic::scaleLen (vs.scaleIdx);
+            int sLen = DCMusic::scaleLen (vs.scaleIdx);
+            float ey = handPosLeft.y;
 
             if (pinch)
             {
@@ -412,23 +419,30 @@ void DualcastPage::processGesture (const DCHandFrame& hf)
                 }
                 else
                 {
-                    float delta      = vs.anchorY - ey;   // up = positive
+                    float delta      = vs.anchorY - ey;
                     int   stepsMoved = (int)(delta / STEP_ZONE);
                     if (stepsMoved != 0)
                     {
-                        vs.step = juce::jlimit (0, scaleLen - 1,
-                                                vs.step + stepsMoved);
+                        vs.step    = juce::jlimit (0, sLen - 1, vs.step + stepsMoved);
                         vs.anchorY -= stepsMoved * STEP_ZONE;
                     }
                 }
             }
             vs.wasPinch = pinch;
 
-            // Compute frequency and push to atomic
             double freq = DCMusic::stepToFreq (vs.step, vs.scaleIdx, vs.octave);
             if (isDrone) eng.atomicDroneFreq.store ((float)freq, std::memory_order_relaxed);
             else         eng.atomicLeadFreq .store ((float)freq, std::memory_order_relaxed);
         }
+    }
+
+    // If the left hand disappears, reset debounce so old state doesn't
+    // linger when the hand comes back into frame.
+    if (! handPosLeft.valid)
+    {
+        handPosLeft.currentZone   = HandPos::GestureZone::Neutral;
+        handPosLeft.confirmedZone = HandPos::GestureZone::Neutral;
+        handPosLeft.zoneFrames    = 0;
     }
 }
 
@@ -821,7 +835,7 @@ void DualcastPage::drawToolbar (juce::Graphics& g, juce::Rectangle<int> tb)
     // Keyboard hints - adjusted trimming so it doesn't overlap borders
     g.setFont (juce::Font (juce::FontOptions().withHeight (9.0f)));
     g.setColour (DC_TEXT_DIM);
-    g.drawText ("Z/X drone oct  |  C/V lead oct  |  S/D drone scale  |  F/G lead scale  |  1-4 drone sound  |  Q-R lead sound",
+    g.drawText ("Z/X drone oct  |  C/V lead oct  |  S/D drone step  |  F/G lead step  |  Space = drone on/off  |  Enter = lead on/off",
                 tb.reduced (12, 0).withTrimmedTop (tb.getHeight() - 18),
                 juce::Justification::centred);
 }
@@ -953,14 +967,15 @@ void DualcastPage::drawZones (juce::Graphics& g, juce::Rectangle<int> pa)
         bool  isDrone = handPosLeft.x < 0.5f;
         auto& vs      = isDrone ? droneState : leadState;
         juce::Colour accent = isDrone ? DC_DRONE_COL : DC_LEAD_COL;
-        float px = handPosLeft.x  * getWidth();
-        float py = handPosLeft.y  * getHeight();
+        // Use raw (unsmoothed) position so the circle tracks the hand exactly
+        float px = handPosLeft.rawX * getWidth();
+        float py = handPosLeft.rawY * getHeight();
         drawHandGlow (g, px, py, accent, vs.noteOn, handPosLeft.pinch);
     }
     if (handPosRight.valid)
     {
-        float px  = handPosRight.x * getWidth();
-        float py  = handPosRight.y * getHeight();
+        float px  = handPosRight.rawX * getWidth();
+        float py  = handPosRight.rawY * getHeight();
         drawVolumeBar (g, eng.atomicMasterVol.load(), px, py);
     }
 }
@@ -1168,11 +1183,11 @@ void DualcastPage::drawHandSkeleton (juce::Graphics& g)
     };
 
     if (handPosLeft.valid)
-        drawCrosshair (handPosLeft.x, handPosLeft.y,
+        drawCrosshair (handPosLeft.rawX, handPosLeft.rawY,
                        handPosLeft.x < 0.5f ? DC_DRONE_COL : DC_LEAD_COL);
 
     if (handPosRight.valid)
-        drawCrosshair (handPosRight.x, handPosRight.y,
+        drawCrosshair (handPosRight.rawX, handPosRight.rawY,
                        juce::Colour (0xff44d448));
 }
 
@@ -1304,4 +1319,118 @@ void DualcastPage::mouseDown (const juce::MouseEvent& e)
     // Click outside all menus → close everything
     closeAllMenus();
     repaint();
+}
+
+// ============================================================
+//  keyPressed  — FIX D: keyboard fallback for voice triggering
+//
+//  Useful when the tracker isn't running (development / demo).
+//  Keys mirror the hint text already shown in the toolbar:
+//
+//   Z / X  → drone octave down / up
+//   C / V  → lead  octave down / up
+//   Space  → toggle DRONE note on/off
+//   Return → toggle LEAD  note on/off
+// ============================================================
+bool DualcastPage::keyPressed (const juce::KeyPress& k)
+{
+    const int key = k.getKeyCode();
+
+    // ── Toggle drone note (Space) ────────────────────────────
+    if (key == juce::KeyPress::spaceKey)
+    {
+        bool on = ! eng.atomicDroneOn.load (std::memory_order_relaxed);
+        eng.atomicDroneOn.store (on, std::memory_order_relaxed);
+        droneState.noteOn = on;
+        repaint();
+        return true;
+    }
+
+    // ── Toggle lead note (Return) ─────────────────────────────
+    if (key == juce::KeyPress::returnKey)
+    {
+        bool on = ! eng.atomicLeadOn.load (std::memory_order_relaxed);
+        eng.atomicLeadOn.store (on, std::memory_order_relaxed);
+        leadState.noteOn = on;
+        repaint();
+        return true;
+    }
+
+    // ── Drone octave: Z = down, X = up ────────────────────────
+    if (key == 'z' || key == 'Z')
+    {
+        droneState.octave = juce::jlimit (0, 6, droneState.octave - 1);
+        double freq = DCMusic::stepToFreq (droneState.step, droneState.scaleIdx, droneState.octave);
+        eng.atomicDroneFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+    if (key == 'x' || key == 'X')
+    {
+        droneState.octave = juce::jlimit (0, 6, droneState.octave + 1);
+        double freq = DCMusic::stepToFreq (droneState.step, droneState.scaleIdx, droneState.octave);
+        eng.atomicDroneFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+
+    // ── Lead octave: C = down, V = up ─────────────────────────
+    if (key == 'c' || key == 'C')
+    {
+        leadState.octave = juce::jlimit (0, 6, leadState.octave - 1);
+        double freq = DCMusic::stepToFreq (leadState.step, leadState.scaleIdx, leadState.octave);
+        eng.atomicLeadFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+    if (key == 'v' || key == 'V')
+    {
+        leadState.octave = juce::jlimit (0, 6, leadState.octave + 1);
+        double freq = DCMusic::stepToFreq (leadState.step, leadState.scaleIdx, leadState.octave);
+        eng.atomicLeadFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+
+    // ── Drone scale step: S = down, D = up ───────────────────
+    if (key == 's' || key == 'S')
+    {
+        int len = DCMusic::scaleLen (droneState.scaleIdx);
+        droneState.step = juce::jlimit (0, len - 1, droneState.step - 1);
+        double freq = DCMusic::stepToFreq (droneState.step, droneState.scaleIdx, droneState.octave);
+        eng.atomicDroneFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+    if (key == 'd' || key == 'D')
+    {
+        int len = DCMusic::scaleLen (droneState.scaleIdx);
+        droneState.step = juce::jlimit (0, len - 1, droneState.step + 1);
+        double freq = DCMusic::stepToFreq (droneState.step, droneState.scaleIdx, droneState.octave);
+        eng.atomicDroneFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+
+    // ── Lead scale step: F = down, G = up ────────────────────
+    if (key == 'f' || key == 'F')
+    {
+        int len = DCMusic::scaleLen (leadState.scaleIdx);
+        leadState.step = juce::jlimit (0, len - 1, leadState.step - 1);
+        double freq = DCMusic::stepToFreq (leadState.step, leadState.scaleIdx, leadState.octave);
+        eng.atomicLeadFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+    if (key == 'g' || key == 'G')
+    {
+        int len = DCMusic::scaleLen (leadState.scaleIdx);
+        leadState.step = juce::jlimit (0, len - 1, leadState.step + 1);
+        double freq = DCMusic::stepToFreq (leadState.step, leadState.scaleIdx, leadState.octave);
+        eng.atomicLeadFreq.store ((float)freq, std::memory_order_relaxed);
+        repaint();
+        return true;
+    }
+
+    return false;
 }
