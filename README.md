@@ -63,8 +63,8 @@ block it on first launch. To open it:
 
 You only need to do this once.
 
-### 4. Grant camera and microphone access
-On first launch, macOS will ask for camera and microphone permission. Grant both.
+### 4. Grant camera access
+On first launch, macOS will ask for camera permission.
 
 ---
 
